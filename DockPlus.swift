@@ -199,17 +199,24 @@ func focusWindow(_ window: AXUIElement, of app: NSRunningApplication) {
     }
     AXUIElementPerformAction(window, kAXRaiseAction as CFString)
     axSet(window, kAXMainAttribute, true)
+    // Also tell the app itself which window is focused. Without this, an app that is already
+    // frontmost can keep its previous window key when switching between its own windows.
+    AXUIElementSetAttributeValue(AXUIElementCreateApplication(app.processIdentifier),
+                                 kAXFocusedWindowAttribute as CFString, window)
 }
 
 /// Posts the synthetic window-server event record that makes a window key
 /// (ported via DockDoor/AltTab from Hammerspoon issue #370).
 func makeKeyWindow(_ psn: inout PSN, _ windowID: CGWindowID) {
     guard let post = SPI.postEventRecord else { return }
-    var bytes = [UInt8](repeating: 0, count: 0x100)
+    var bytes = [UInt8](repeating: 0, count: 0xF8)
     bytes[0x04] = 0xF8
     bytes[0x3A] = 0x10
     withUnsafeBytes(of: UInt32(windowID)) { bytes.replaceSubrange(0x3C..<0x40, with: $0) }
-    withUnsafeBytes(of: CGPoint(x: -1, y: -1)) { bytes.replaceSubrange(0x20..<0x30, with: $0) }
+    // The location field must be all 0xFF bytes, as in Hammerspoon and AltTab. Writing
+    // CGPoint(-1, -1) stores the doubles -1.0 instead, which the window server reads as a real
+    // position, so the window was only sometimes made key.
+    bytes.replaceSubrange(0x20..<0x30, with: repeatElement(0xFF, count: 0x10))
     bytes[0x08] = 0x01
     _ = post(&psn, &bytes)
     bytes[0x08] = 0x02
@@ -323,7 +330,13 @@ final class WindowTile: NSView {
         layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.12).cgColor
     }
     override func mouseExited(with event: NSEvent) { layer?.backgroundColor = nil }
-    override func mouseDown(with event: NSEvent) { onPick(ref, event.modifierFlags.contains(.option)) }
+    // Act on mouse-up, like a button: acting on mouse-down hid the panel while the button was
+    // still held, and the stray mouse-up then landed on the app's current window.
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {
+        guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+        onPick(ref, event.modifierFlags.contains(.option))
+    }
 }
 
 final class WindowPreview {
@@ -336,6 +349,8 @@ final class WindowPreview {
     private var outsideSince: Date?
     private var generation = 0
     private(set) var shownPID: pid_t?
+    /// Called with the panel's frame in Quartz coordinates when it appears, and nil when it hides.
+    var onFrameChange: ((CGRect?) -> Void)?
 
     var isVisible: Bool { panel.isVisible }
 
@@ -451,8 +466,11 @@ final class WindowPreview {
         origin.x = min(max(origin.x, limit.minX), limit.maxX - size.width)
         origin.y = min(max(origin.y, screen.frame.minY + 4), screen.frame.maxY - size.height - 4)
 
-        panel.setFrame(NSRect(origin: origin, size: size), display: true)
+        let panelFrame = NSRect(origin: origin, size: size)
+        panel.setFrame(panelFrame, display: true)
         panel.orderFrontRegardless()
+        onFrameChange?(CGRect(x: panelFrame.minX, y: primaryHeight - panelFrame.maxY,
+                              width: panelFrame.width, height: panelFrame.height))
         panel.invalidateShadow()
         startTracking()
 
@@ -477,6 +495,7 @@ final class WindowPreview {
         panel.orderOut(nil)
         shownPID = nil
         stopTracking()
+        onFrameChange?(nil)
     }
 
     private func pick(_ window: WindowRef, of app: NSRunningApplication, toggleMinimize: Bool) {
@@ -485,9 +504,15 @@ final class WindowPreview {
             axSet(window.element, kAXMinimizedAttribute, !window.minimized)
             return
         }
-        if app.isHidden { app.unhide() }
+        let wasHidden = app.isHidden
+        if wasHidden { app.unhide() }
         if window.minimized { axSet(window.element, kAXMinimizedAttribute, false) }
         focusWindow(window.element, of: app)
+        // A window that is still animating out of the Dock, or an app that is still unhiding,
+        // can ignore the first focus request, so repeat it once that has finished.
+        if wasHidden || window.minimized {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { focusWindow(window.element, of: app) }
+        }
     }
 
     // Close the panel once the pointer has left both the icon and the panel for a moment.
@@ -549,6 +574,7 @@ struct TapState {
     var hover: HoverInfo?
     var selectedItem: AXUIElement?     // any Dock icon under the pointer, running app or not
     var dockListFrame: CGRect?
+    var previewFrame: CGRect?          // hover panel while visible, Quartz coordinates
     var armed: ClickSnapshot?          // taken at the first click of a possible double-click
     var swallowEventNumber: Int64?     // the mouse-up that matches the swallowed mouse-down
 }
@@ -592,6 +618,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
     private var tapThread: Thread?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        preview.onFrameChange = { [tapState = self.tapState] frame in tapState.with { $0.previewFrame = frame } }
         defaults.register(defaults: ["doubleClickToggle": true, "hoverPreviews": true])
         setUpMenu()
         // Screen Recording is requested later, only when a hover preview is about to appear.
@@ -858,7 +885,15 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         // The Dock marks the icon under the pointer as selected; the frame check (with room for
         // magnification) guards against a stale selection when clicking elsewhere.
         let point = event.location
+        // Clicks on the hover panel belong to the panel. The Dock can still report the icon as
+        // selected for a moment after the pointer leaves it, and the panel sits within the slack
+        // below, so without this check a click on a thumbnail closed the panel before the
+        // thumbnail saw it, and the window switch was lost.
         guard let hover = tapState.with({ s -> HoverInfo? in
+            if let panel = s.previewFrame, panel.contains(point) {
+                s.armed = nil
+                return nil
+            }
             guard let hovered = s.hover,
                   let dock = s.dockListFrame,
                   dock.insetBy(dx: -128, dy: -128).contains(point) else {
@@ -912,6 +947,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
     private func handleContextClick(at point: CGPoint) {
         guard let icon = tapState.with({ s -> AXUIElement? in
             s.armed = nil
+            if let panel = s.previewFrame, panel.contains(point) { return nil }
             guard let dock = s.dockListFrame, dock.insetBy(dx: -128, dy: -128).contains(point) else { return nil }
             return s.selectedItem
         }) else { return }
