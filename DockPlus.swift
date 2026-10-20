@@ -575,6 +575,9 @@ struct TapState {
     var selectedItem: AXUIElement?     // any Dock icon under the pointer, running app or not
     var dockListFrame: CGRect?
     var previewFrame: CGRect?          // hover panel while visible, Quartz coordinates
+    // Where the hover panel last appeared for the current Dock selection, kept after it hides.
+    // Cleared when the Dock selects another icon or none.
+    var lastPreviewFrame: CGRect?
     var armed: ClickSnapshot?          // taken at the first click of a possible double-click
     var swallowEventNumber: Int64?     // the mouse-up that matches the swallowed mouse-down
 }
@@ -618,7 +621,12 @@ final class DockPlus: NSObject, NSApplicationDelegate {
     private var tapThread: Thread?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        preview.onFrameChange = { [tapState = self.tapState] frame in tapState.with { $0.previewFrame = frame } }
+        preview.onFrameChange = { [tapState = self.tapState] frame in
+            tapState.with { s in
+                s.previewFrame = frame
+                if let frame { s.lastPreviewFrame = frame }
+            }
+        }
         defaults.register(defaults: ["doubleClickToggle": true, "hoverPreviews": true])
         setUpMenu()
         // Screen Recording is requested later, only when a hover preview is about to appear.
@@ -682,6 +690,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
             s.hover = nil
             s.selectedItem = nil
             s.dockListFrame = nil
+            s.lastPreviewFrame = nil
         }
         guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return }
         dockPID = dock.processIdentifier
@@ -754,6 +763,13 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         let listFrame = dockList.flatMap(axFrame)
         tapState.with { s in
             if let listFrame { s.dockListFrame = listFrame }
+            let sameItem: Bool
+            switch (s.selectedItem, selected) {
+            case let (old?, new?): sameItem = CFEqual(old, new)
+            case (nil, nil): sameItem = true
+            default: sameItem = false
+            }
+            if !sameItem { s.lastPreviewFrame = nil }
             s.selectedItem = selected
             s.hover = found
         }
@@ -889,8 +905,14 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         // selected for a moment after the pointer leaves it, and the panel sits within the slack
         // below, so without this check a click on a thumbnail closed the panel before the
         // thumbnail saw it, and the window switch was lost.
+        //
+        // The Dock doesn't always clear its selection when the pointer moves off an icon into
+        // the panel, so once the panel hides, the icon can still look hovered. Clicks where the
+        // panel last appeared therefore never count as Dock clicks either; otherwise a
+        // double-click on that now empty spot minimized the app's window. The panel never
+        // overlaps the icons, so this can't swallow a real Dock click.
         guard let hover = tapState.with({ s -> HoverInfo? in
-            if let panel = s.previewFrame, panel.contains(point) {
+            if let panel = s.previewFrame ?? s.lastPreviewFrame, panel.contains(point) {
                 s.armed = nil
                 return nil
             }
