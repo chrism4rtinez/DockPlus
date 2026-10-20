@@ -564,6 +564,7 @@ struct ClickSnapshot {
 /// The running app whose Dock icon is under the pointer, recorded on the main thread.
 struct HoverInfo {
     let item: AXUIElement
+    let itemFrame: CGRect?             // the icon's frame when the Dock selected it, Quartz coordinates
     let app: NSRunningApplication
     var snapshot: ClickSnapshot
 }
@@ -574,7 +575,11 @@ struct TapState {
     var hover: HoverInfo?
     var selectedItem: AXUIElement?     // any Dock icon under the pointer, running app or not
     var dockListFrame: CGRect?
+    var magnificationSlack: CGFloat = 128 // how far a magnified icon can grow past its resting frame
     var previewFrame: CGRect?          // hover panel while visible, Quartz coordinates
+    // Where the hover panel last appeared for the current Dock selection, kept after it hides.
+    // Cleared when the Dock selects another icon or none.
+    var lastPreviewFrame: CGRect?
     var armed: ClickSnapshot?          // taken at the first click of a possible double-click
     var swallowEventNumber: Int64?     // the mouse-up that matches the swallowed mouse-down
 }
@@ -618,7 +623,12 @@ final class DockPlus: NSObject, NSApplicationDelegate {
     private var tapThread: Thread?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        preview.onFrameChange = { [tapState = self.tapState] frame in tapState.with { $0.previewFrame = frame } }
+        preview.onFrameChange = { [tapState = self.tapState] frame in
+            tapState.with { s in
+                s.previewFrame = frame
+                if let frame { s.lastPreviewFrame = frame }
+            }
+        }
         defaults.register(defaults: ["doubleClickToggle": true, "hoverPreviews": true])
         setUpMenu()
         // Screen Recording is requested later, only when a hover preview is about to appear.
@@ -665,7 +675,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             guard let self else { return }
             let current = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier
-            if current != self.dockPID || self.dockList == nil { self.attachToDock() }
+            if current != self.dockPID || self.dockList == nil { self.attachToDock() } else { self.readMagnification() }
         }
     }
 
@@ -682,6 +692,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
             s.hover = nil
             s.selectedItem = nil
             s.dockListFrame = nil
+            s.lastPreviewFrame = nil
         }
         guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return }
         dockPID = dock.processIdentifier
@@ -691,6 +702,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         dockList = list
         let listFrame = axFrame(list)
         tapState.with { $0.dockListFrame = listFrame }
+        readMagnification()
 
         var observer: AXObserver?
         let callback: AXObserverCallback = { _, _, _, _ in DockPlus.shared.dockSelectionChanged() }
@@ -698,6 +710,20 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         AXObserverAddNotification(observer, list, kAXSelectedChildrenChangedNotification as CFString, nil)
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         dockObserver = observer
+    }
+
+    /// Reads the Dock's magnification setting (it can change without the Dock restarting), so
+    /// the event tap knows how far past its resting frame the hovered icon can reach.
+    private func readMagnification() {
+        let domain = "com.apple.dock" as CFString
+        CFPreferencesAppSynchronize(domain)
+        func number(_ key: String) -> CGFloat? {
+            (CFPreferencesCopyAppValue(key as CFString, domain) as? NSNumber).map { CGFloat($0.doubleValue) }
+        }
+        let magnifies = (CFPreferencesCopyAppValue("magnification" as CFString, domain) as? NSNumber)?.boolValue ?? false
+        // Unknown sizes fall back to the largest magnified size the Dock allows.
+        let slack = magnifies ? max(0, (number("largesize") ?? 128) - (number("tilesize") ?? 0)) : 0
+        tapState.with { $0.magnificationSlack = slack }
     }
 
     /// The Dock marks the icon under the pointer as its "selected" child.
@@ -749,11 +775,18 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         let selected = hoveredDockItem()
         var found: HoverInfo?
         if let item = selected, let app = runningApp(for: item), app.processIdentifier != getpid() {
-            found = HoverInfo(item: item, app: app, snapshot: takeSnapshot(of: app))
+            found = HoverInfo(item: item, itemFrame: axFrame(item), app: app, snapshot: takeSnapshot(of: app))
         }
         let listFrame = dockList.flatMap(axFrame)
         tapState.with { s in
             if let listFrame { s.dockListFrame = listFrame }
+            let sameItem: Bool
+            switch (s.selectedItem, selected) {
+            case let (old?, new?): sameItem = CFEqual(old, new)
+            case (nil, nil): sameItem = true
+            default: sameItem = false
+            }
+            if !sameItem { s.lastPreviewFrame = nil }
             s.selectedItem = selected
             s.hover = found
         }
@@ -889,14 +922,26 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         // selected for a moment after the pointer leaves it, and the panel sits within the slack
         // below, so without this check a click on a thumbnail closed the panel before the
         // thumbnail saw it, and the window switch was lost.
+        //
+        // The Dock doesn't always clear its selection when the pointer moves off an icon into
+        // the panel, so once the panel hides, the icon can still look hovered. Clicks where the
+        // panel last appeared therefore never count as Dock clicks either; otherwise a
+        // double-click on that now empty spot minimized the app's window. The panel never
+        // overlaps the icons, so this can't swallow a real Dock click.
         guard let hover = tapState.with({ s -> HoverInfo? in
-            if let panel = s.previewFrame, panel.contains(point) {
+            if let panel = s.previewFrame ?? s.lastPreviewFrame, panel.contains(point) {
                 s.armed = nil
                 return nil
             }
+            // The click must land on the hovered icon: on the Dock itself, or within reach of
+            // that icon once magnified. The Dock can keep an icon selected after the pointer has
+            // left the Dock, so a looser area (it used to be 128 pt all around the Dock) let a
+            // double-click on empty space near the Dock minimize the app's window.
+            let reach = s.magnificationSlack + 4
             guard let hovered = s.hover,
                   let dock = s.dockListFrame,
-                  dock.insetBy(dx: -128, dy: -128).contains(point) else {
+                  dock.insetBy(dx: -4, dy: -4).contains(point)
+                    || (hovered.itemFrame?.insetBy(dx: -reach, dy: -reach).contains(point) ?? false) else {
                 s.armed = nil
                 return nil
             }
