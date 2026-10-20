@@ -775,7 +775,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         let selected = hoveredDockItem()
         var found: HoverInfo?
         if let item = selected, let app = runningApp(for: item), app.processIdentifier != getpid() {
-            found = HoverInfo(item: item, app: app, itemFrame: axFrame(item), snapshot: takeSnapshot(of: app))
+            found = HoverInfo(item: item, itemFrame: axFrame(item), app: app, snapshot: takeSnapshot(of: app))
         }
         let listFrame = dockList.flatMap(axFrame)
         tapState.with { s in
