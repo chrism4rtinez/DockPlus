@@ -3,6 +3,7 @@
 // Two Dock behaviors macOS doesn't offer:
 //   • Double-click a running app's Dock icon → minimize its most recent window;
 //     double-click again → restore it (the most recently minimized window).
+//     Once an app has no windows left on screen, the next window in front gets focus.
 //   • Hover a running app's Dock icon → a panel with thumbnails of all its windows.
 //     Click a thumbnail to focus that window (restoring it if minimized);
 //     ⌥-click a thumbnail to minimize / restore just that window.
@@ -203,6 +204,48 @@ func focusWindow(_ window: AXUIElement, of app: NSRunningApplication) {
     // frontmost can keep its previous window key when switching between its own windows.
     AXUIElementSetAttributeValue(AXUIElementCreateApplication(app.processIdentifier),
                                  kAXFocusedWindowAttribute as CFString, window)
+}
+
+/// After the app's last window on this Space is minimized, focuses the frontmost window of
+/// the next app in z-order, so focus doesn't stay on an app with nothing on screen.
+/// Waits for the minimize to register, and does nothing if the user switched apps meanwhile.
+func focusNextWindowIfNoneLeft(after app: NSRunningApplication) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
+              !app.isHidden,
+              !appWindows(app).contains(where: { !$0.minimized }),
+              let found = frontmostWindow(excluding: app.processIdentifier) else { return }
+        let (next, window) = found
+        if let window {
+            focusWindow(window, of: next)
+        } else {
+            _ = next.activate(options: [])
+        }
+    }
+}
+
+/// The frontmost on-screen app window not owned by `pid` (or DockPlus), as its app and,
+/// when it can be matched, its Accessibility element.
+func frontmostWindow(excluding pid: pid_t) -> (NSRunningApplication, AXUIElement?)? {
+    let ownPID = ProcessInfo.processInfo.processIdentifier
+    guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                kCGNullWindowID) as? [[String: Any]] else { return nil }
+    for info in list { // front to back
+        guard (info[kCGWindowLayer as String] as? Int) == 0,
+              let owner = info[kCGWindowOwnerPID as String] as? pid_t,
+              owner != pid, owner != ownPID,
+              (info[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+              let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
+              let bounds = CGRect(dictionaryRepresentation: boundsDict),
+              bounds.width >= 50, bounds.height >= 50,
+              let app = NSRunningApplication(processIdentifier: owner),
+              app.activationPolicy != .prohibited, !app.isHidden else { continue }
+        let id = info[kCGWindowNumber as String] as? CGWindowID ?? 0
+        let match = appWindows(app).first { $0.id == id && !$0.minimized }?.element
+        guard match != nil || SPI.axGetWindow == nil else { continue } // not a user window
+        return (app, match)
+    }
+    return nil
 }
 
 /// Posts the synthetic window-server event record that makes a window key
@@ -502,6 +545,7 @@ final class WindowPreview {
         hide()
         if toggleMinimize {
             axSet(window.element, kAXMinimizedAttribute, !window.minimized)
+            if !window.minimized { focusNextWindowIfNoneLeft(after: app) }
             return
         }
         let wasHidden = app.isHidden
@@ -1008,6 +1052,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         if let window = before.visibleWindow {
             if before.wasFrontmost {
                 axSet(window, kAXMinimizedAttribute, true)  // it was in use → minimize it
+                focusNextWindowIfNoneLeft(after: app)
             } else {
                 focusWindow(window, of: app)                // it was behind other apps → bring it forward
             }
