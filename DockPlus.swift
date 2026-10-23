@@ -820,7 +820,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
             self.preview.show(app: app, anchor: frame, dockFrame: self.tapState.with { $0.dockListFrame })
         }
         pendingShow = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + (preview.isVisible ? 0.05 : 0.35), execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (preview.isVisible ? 0.2 : 0.35), execute: work)
     }
 
     /// Right-click or Control-click on a Dock icon: the Dock is opening that icon's menu, so
