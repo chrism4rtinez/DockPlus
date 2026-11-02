@@ -5,15 +5,21 @@
 #   SIGN_ID="Developer ID Application: You (TEAMID)" NOTARY_PROFILE=dockplus ./make-dmg.sh
 #                                    signed and notarized app inside a signed, notarized and
 #                                    stapled DMG, ready to hand to other people
-# VERSION and BUILD_NUMBER are passed through to build.sh.
+# VERSION and BUILD_NUMBER are passed through to build.sh. The app is Apple silicon only.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+VOLUME="DockPlus"
+# Checked before building, so a notarized build doesn't run for minutes and then fail here.
+if [[ -d "/Volumes/$VOLUME" ]]; then
+    echo "error: a volume named $VOLUME is already mounted; eject it first" >&2
+    exit 1
+fi
 
 ./build.sh
 
 APP="DockPlus.app"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
-VOLUME="DockPlus"
 DMG="DockPlus-$VERSION.dmg"
 SIGN_ID="${SIGN_ID:--}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
@@ -26,10 +32,6 @@ ditto "$APP" "$WORK/root/$APP"
 ln -s /Applications "$WORK/root/Applications"
 
 # Build read-write first so Finder can save the window layout, then compress.
-if [[ -d "/Volumes/$VOLUME" ]]; then
-    echo "error: a volume named $VOLUME is already mounted; eject it first" >&2
-    exit 1
-fi
 hdiutil create -quiet -volname "$VOLUME" -srcfolder "$WORK/root" -fs HFS+ -format UDRW "$WORK/rw.dmg"
 hdiutil attach -quiet -noautoopen "$WORK/rw.dmg"
 
@@ -60,7 +62,15 @@ then
 fi
 
 sync
-hdiutil detach -quiet "/Volumes/$VOLUME"
+# Finder can keep the volume busy for a moment after closing its window, so retry.
+for attempt in 1 2 3 4 5; do
+    hdiutil detach -quiet "/Volumes/$VOLUME" && break
+    if [[ $attempt == 5 ]]; then
+        hdiutil detach -quiet -force "/Volumes/$VOLUME"
+    else
+        sleep 2
+    fi
+done
 rm -f "$DMG"
 hdiutil convert -quiet "$WORK/rw.dmg" -format UDZO -imagekey zlib-level=9 -o "$DMG"
 

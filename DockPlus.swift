@@ -629,6 +629,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
                 if let frame { s.lastPreviewFrame = frame }
             }
         }
+        migrateLegacySettings()
         defaults.register(defaults: ["doubleClickToggle": true, "hoverPreviews": true])
         setUpMenu()
         // Screen Recording is requested later, only when a hover preview is about to appear.
@@ -640,6 +641,20 @@ final class DockPlus: NSObject, NSApplicationDelegate {
                 guard AXIsProcessTrusted() else { return }
                 timer.invalidate()
                 self?.start()
+            }
+        }
+    }
+
+    /// Earlier builds used the bundle ID local.dockplus, so their settings live in that
+    /// domain. Copy them over once, so switching IDs keeps the user's choices. (Accessibility,
+    /// Screen Recording and Open at Login are tied to the ID by macOS and can't be carried over.)
+    private func migrateLegacySettings() {
+        guard !defaults.bool(forKey: "migratedLegacySettings") else { return }
+        defaults.set(true, forKey: "migratedLegacySettings")
+        let legacy = "local.dockplus" as CFString
+        for key in ["doubleClickToggle", "hoverPreviews"] where defaults.object(forKey: key) == nil {
+            if let value = CFPreferencesCopyAppValue(key as CFString, legacy) as? Bool {
+                defaults.set(value, forKey: key)
             }
         }
     }
