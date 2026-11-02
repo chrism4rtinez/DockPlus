@@ -210,21 +210,18 @@ func focusWindow(_ window: AXUIElement, of app: NSRunningApplication) {
                                  kAXFocusedWindowAttribute as CFString, window)
 }
 
-/// After the app's last window on this Space is minimized, focuses the frontmost window of
+/// If the frontmost app has no windows left on this Space, focuses the frontmost window of
 /// the next app in z-order, so focus doesn't stay on an app with nothing on screen.
-/// Waits for the minimize to register, and does nothing if the user switched apps meanwhile.
-func focusNextWindowIfNoneLeft(after app: NSRunningApplication) {
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
-              !app.isHidden,
-              !appWindows(app).contains(where: { !$0.minimized }),
-              let found = frontmostWindow(excluding: app.processIdentifier) else { return }
-        let (next, window) = found
-        if let window {
-            focusWindow(window, of: next)
-        } else {
-            _ = next.activate(options: [])
-        }
+func focusNextWindowIfNoneLeft(in app: NSRunningApplication) {
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
+          !app.isHidden,
+          !appWindows(app).contains(where: { !$0.minimized }),
+          let found = frontmostWindow(excluding: app.processIdentifier) else { return }
+    let (next, window) = found
+    if let window {
+        focusWindow(window, of: next)
+    } else {
+        _ = next.activate(options: [])
     }
 }
 
@@ -411,9 +408,10 @@ final class MinimizeTracker {
                 DockPlus.shared.cacheThumbnail(of: element, after: 0.3)
                 return
             }
-            DockPlus.shared.tracker.record(element,
-                                           minimized: (notification as String) == kAXWindowMiniaturizedNotification)
+            let minimized = (notification as String) == kAXWindowMiniaturizedNotification
+            DockPlus.shared.tracker.record(element, minimized: minimized)
             DockPlus.shared.refreshHoverSnapshot()
+            if minimized { DockPlus.shared.windowMinimized(in: axPID(element)) }
         }
         guard AXObserverCreate(pid, callback, &observer) == .success, let observer else { return }
         let axApp = AXUIElementCreateApplication(pid)
@@ -677,7 +675,6 @@ final class WindowPreview {
         if toggleMinimize {
             if !window.minimized && !app.isHidden { thumbnails.captureNow(window.element) } // picture for later
             axSet(window.element, kAXMinimizedAttribute, !window.minimized)
-            if !window.minimized { focusNextWindowIfNoneLeft(after: app) }
             return
         }
         let wasHidden = app.isHidden
@@ -788,6 +785,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
     private var dockList: AXUIElement?
     private var dockObserver: AXObserver?
     private var pendingShow: DispatchWorkItem?
+    private var pendingHandoff: DispatchWorkItem?
     private var askedForScreenCapture = false
     private var suppressedItem: AXUIElement? // Dock icon last right-clicked; no previews for now
     private var statusItem: NSStatusItem?
@@ -967,6 +965,19 @@ final class DockPlus: NSObject, NSApplicationDelegate {
                       wasFrontmost: NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
                       wasHidden: app.isHidden,
                       visibleWindow: visibleFocusedWindow(of: app))
+    }
+
+    /// Called once a window has finished minimizing, however it was minimized. AX only reports
+    /// the window as minimized after the animation, so the check can't run any earlier. The short
+    /// wait lets a Minimize All finish, so the handoff runs once, after the last window.
+    func windowMinimized(in pid: pid_t) {
+        pendingHandoff?.cancel()
+        let work = DispatchWorkItem {
+            guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+            focusNextWindowIfNoneLeft(in: app)
+        }
+        pendingHandoff = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
     /// Re-reads the hovered app's state after something may have changed it: a click,
@@ -1223,7 +1234,6 @@ final class DockPlus: NSObject, NSApplicationDelegate {
             if before.wasFrontmost {
                 if hoverEnabled { preview.thumbnails.captureNow(window) } // picture for the hover panel
                 axSet(window, kAXMinimizedAttribute, true)  // it was in use → minimize it
-                focusNextWindowIfNoneLeft(after: app)
             } else {
                 focusWindow(window, of: app)                // it was behind other apps → bring it forward
             }
