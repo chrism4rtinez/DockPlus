@@ -270,8 +270,9 @@ final class ThumbnailCache {
     func image(for id: CGWindowID) -> CGImage? { entries[id]?.image }
 
     func store(_ image: CGImage, for id: CGWindowID, pid: pid_t) {
-        // A capture can finish after its app quit and was forgotten; don't keep it then.
-        guard id != 0, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
+        // A capture can finish after its app quit or previews were turned off; don't keep it then.
+        guard id != 0, UserDefaults.standard.bool(forKey: "hoverPreviews"),
+              let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
         counter += 1
         entries[id] = (pid, image, counter)
         if entries.count > Self.limit, let oldest = entries.min(by: { $0.value.stamp < $1.value.stamp }) {
@@ -760,6 +761,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
                 if let frame { s.lastPreviewFrame = frame }
             }
         }
+        migrateLegacySettings()
         defaults.register(defaults: ["doubleClickToggle": true, "hoverPreviews": true])
         setUpMenu()
         // Screen Recording is requested later, only when a hover preview is about to appear.
@@ -772,6 +774,15 @@ final class DockPlus: NSObject, NSApplicationDelegate {
                 timer.invalidate()
                 self?.start()
             }
+        }
+    }
+
+    /// Copies settings saved under the old bundle ID. Never overwrites a setting saved under
+    /// the current ID, so it's safe on every launch. Must run before defaults are registered.
+    private func migrateLegacySettings() {
+        guard let old = defaults.persistentDomain(forName: "local.dockplus") else { return }
+        for key in ["doubleClickToggle", "hoverPreviews"] where defaults.object(forKey: key) == nil {
+            if let value = old[key] { defaults.set(value, forKey: key) }
         }
     }
 

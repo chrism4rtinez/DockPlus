@@ -38,7 +38,8 @@ fi
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 
-xcrun swiftc -O -swift-version 5 DockPlus.swift -o "$APP/Contents/MacOS/DockPlus"
+# Apple silicon only; DockPlus does not support Intel Macs.
+xcrun swiftc -O -swift-version 5 -target arm64-apple-macos14.0 DockPlus.swift -o "$APP/Contents/MacOS/DockPlus"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
