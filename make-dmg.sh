@@ -5,7 +5,7 @@
 #   SIGN_ID="Developer ID Application: You (TEAMID)" NOTARY_PROFILE=dockplus ./make-dmg.sh
 #                                    signed and notarized app inside a signed, notarized and
 #                                    stapled DMG, ready to hand to other people
-# VERSION and BUILD_NUMBER are passed through to build.sh. The app runs on Apple silicon only.
+# VERSION and BUILD_NUMBER are passed through to build.sh.
 set -euo pipefail
 cd "$(dirname "$0")"
 
