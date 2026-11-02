@@ -11,6 +11,8 @@
 #                                    `xcrun notarytool store-credentials`.
 #   VERSION=1.1 BUILD_NUMBER=2       set the version shown in Finder (default 1.0 / 1)
 #
+# DockPlus is built for Apple silicon only (arm64), also when building on an Intel Mac.
+#
 # Use ./make-dmg.sh to wrap the result in a drag-to-Applications disk image.
 #
 # The app is always signed with Hardened Runtime (--options runtime). DockPlus holds
@@ -38,7 +40,8 @@ fi
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 
-xcrun swiftc -O -swift-version 5 DockPlus.swift -o "$APP/Contents/MacOS/DockPlus"
+# Apple silicon only: Intel Macs aren't supported.
+xcrun swiftc -O -swift-version 5 -target arm64-apple-macos14.0 DockPlus.swift -o "$APP/Contents/MacOS/DockPlus"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -52,6 +55,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key>  <string>$VERSION</string>
     <key>CFBundleVersion</key>             <string>$BUILD_NUMBER</string>
     <key>LSMinimumSystemVersion</key>      <string>14.0</string>
+    <key>LSArchitecturePriority</key>      <array><string>arm64</string></array>
     <key>LSUIElement</key>                 <true/>
     <key>NSHighResolutionCapable</key>     <true/>
 </dict>
@@ -72,10 +76,12 @@ fi
 
 if [[ -n "$NOTARY_PROFILE" ]]; then
     echo "Notarizing $APP (usually takes a few minutes)..."
-    ZIP="$(mktemp -d)/DockPlus.zip"
+    ZIP_DIR="$(mktemp -d)"
+    trap 'rm -rf "$ZIP_DIR"' EXIT # removed even if notarization fails
+    ZIP="$ZIP_DIR/DockPlus.zip"
     ditto -c -k --keepParent "$APP" "$ZIP"
     xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
-    rm -f "$ZIP"
+    rm -rf "$ZIP_DIR"
     # Stapling attaches the ticket, so Gatekeeper accepts the app even offline.
     xcrun stapler staple "$APP"
     spctl --assess --type execute --verbose "$APP"
