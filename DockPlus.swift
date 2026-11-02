@@ -7,6 +7,7 @@
 //   • Hover a running app's Dock icon → a panel with thumbnails of all its windows.
 //     Click a thumbnail to focus that window (restoring it if minimized);
 //     ⌥-click a thumbnail to minimize / restore just that window.
+//     A minimized window shows how it looked when it was last on screen.
 //     Right-click or Control-click the icon to close the panel. It stays closed while the
 //     Dock's menu is open, and until the pointer moves to another icon or leaves the Dock.
 //
@@ -39,6 +40,9 @@
 //     settings; window titles and thumbnails stay in memory and are never logged.
 //   • The hover panel is excluded from screen sharing where macOS honors that, and never
 //     captures the windows of hidden apps.
+//   • For those minimized-window pictures, DockPlus keeps a small, downscaled thumbnail of a
+//     window when it is clicked, focused, or shown in the panel (at most 64, in memory only,
+//     dropped when the app quits). This only happens while hover previews are on.
 //   • Screen Recording is only requested the first time a hover preview is about to appear.
 //
 // Permissions: Accessibility (required), Screen Recording (thumbnails only).
@@ -281,6 +285,113 @@ func captureWindow(_ id: CGWindowID) -> CGImage? {
     return (first as! CGImage)
 }
 
+/// A copy of `image` no larger than a hover tile needs (at 2x), so cached thumbnails stay small.
+func downscaled(_ image: CGImage, maxSize: CGSize = CGSize(width: 440, height: 320)) -> CGImage {
+    let scale = min(1, maxSize.width / CGFloat(image.width), maxSize.height / CGFloat(image.height))
+    guard scale < 1 else { return image }
+    let width = max(1, Int(CGFloat(image.width) * scale))
+    let height = max(1, Int(CGFloat(image.height) * scale))
+    guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue) else { return image }
+    context.interpolationQuality = .high
+    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    return context.makeImage() ?? image
+}
+
+// MARK: - Last-seen thumbnails
+
+/// The last thumbnail captured of each window while it was on screen. A minimized window
+/// can't be captured reliably, so the hover panel shows what it looked like when it was
+/// last seen, ideally just before it was minimized. Main thread only; kept in memory only,
+/// downscaled, and limited in number.
+final class ThumbnailCache {
+    private static let limit = 64
+    private var entries: [CGWindowID: (pid: pid_t, image: CGImage, stamp: UInt64)] = [:]
+    private var counter: UInt64 = 0
+
+    func image(for id: CGWindowID) -> CGImage? { entries[id]?.image }
+
+    func store(_ image: CGImage, for id: CGWindowID, pid: pid_t) {
+        // A capture can finish after its app quit or previews were turned off; don't keep it then.
+        guard id != 0, UserDefaults.standard.bool(forKey: "hoverPreviews"),
+              let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
+        counter += 1
+        entries[id] = (pid, image, counter)
+        if entries.count > Self.limit, let oldest = entries.min(by: { $0.value.stamp < $1.value.stamp }) {
+            entries[oldest.key] = nil
+        }
+    }
+
+    func forget(_ pid: pid_t) {
+        entries = entries.filter { $0.value.pid != pid }
+    }
+
+    /// Drops every picture, e.g. when hover previews are turned off.
+    func removeAll() {
+        entries.removeAll()
+        lastClickCapture = .distantPast
+    }
+
+    private var lastClickCapture = Date.distantPast
+
+    /// Captures a window now, on the calling (main) thread. Used right before DockPlus itself
+    /// minimizes a window, so the cached image is exactly what was on screen.
+    func captureNow(_ window: AXUIElement) {
+        var id: CGWindowID = 0
+        _ = SPI.axGetWindow?(window, &id)
+        guard id != 0, let image = captureWindow(id) else { return }
+        store(downscaled(image), for: id, pid: axPID(window))
+    }
+
+    /// Captures the normal app window under a screen point (Quartz coordinates), off the main
+    /// thread. Uses only the window server, never Accessibility, since it runs on every click.
+    func refreshWindow(at point: CGPoint) {
+        // At most one click capture per half second, so rapid clicking stays cheap.
+        guard Date().timeIntervalSince(lastClickCapture) > 0.5 else { return }
+        lastClickCapture = Date()
+        let me = getpid()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                        kCGNullWindowID) as? [[String: Any]] else { return }
+            // Front to back: the first window containing the point is the one clicked.
+            guard let hit = list.first(where: { info in
+                guard let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
+                      let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { return false }
+                return bounds.contains(point)
+            }),
+                  (hit[kCGWindowLayer as String] as? Int) == 0,
+                  let pid = (hit[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value, pid != me,
+                  let number = hit[kCGWindowNumber as String] as? NSNumber else { return }
+            let id = CGWindowID(number.uint32Value)
+            guard let image = captureWindow(id).map({ downscaled($0) }) else { return }
+            // Minimized while this was being captured: keep the earlier, clean image.
+            let info = CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]]
+            guard (info?.first?[kCGWindowIsOnscreen as String] as? Bool) == true else { return }
+            DispatchQueue.main.async { self?.store(image, for: id, pid: pid) }
+        }
+    }
+
+    /// Captures a window that is on screen, off the main thread, and caches the result.
+    func refresh(_ window: AXUIElement) {
+        var id: CGWindowID = 0
+        _ = SPI.axGetWindow?(window, &id)
+        // Only standard windows: sheets, panels and dialogs would just use up cache slots.
+        guard id != 0, CGPreflightScreenCaptureAccess(),
+              axString(window, kAXSubroleAttribute) == kAXStandardWindowSubrole,
+              axBool(window, kAXMinimizedAttribute) != true else { return }
+        let pid = axPID(window)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let image = captureWindow(id).map({ downscaled($0) }) else { return }
+            DispatchQueue.main.async {
+                // Minimized while this was being captured: keep the earlier, clean image.
+                guard axBool(window, kAXMinimizedAttribute) != true else { return }
+                self?.store(image, for: id, pid: pid)
+            }
+        }
+    }
+}
+
 // MARK: - Minimize history
 
 /// Remembers the order windows were minimized in, so "restore" brings back the most recent one.
@@ -294,6 +405,12 @@ final class MinimizeTracker {
         guard app.activationPolicy == .regular, pid != getpid(), observers[pid] == nil else { return }
         var observer: AXObserver?
         let callback: AXObserverCallback = { _, element, notification, _ in
+            if (notification as String) == kAXFocusedWindowChangedNotification {
+                // Remember what a window looks like whenever the user switches to it, so a
+                // later minimize has a recent picture to show in the hover panel.
+                DockPlus.shared.cacheThumbnail(of: element, after: 0.3)
+                return
+            }
             DockPlus.shared.tracker.record(element,
                                            minimized: (notification as String) == kAXWindowMiniaturizedNotification)
             DockPlus.shared.refreshHoverSnapshot()
@@ -303,6 +420,7 @@ final class MinimizeTracker {
         let a = AXObserverAddNotification(observer, axApp, kAXWindowMiniaturizedNotification as CFString, nil)
         let b = AXObserverAddNotification(observer, axApp, kAXWindowDeminiaturizedNotification as CFString, nil)
         guard a == .success || b == .success else { return }
+        _ = AXObserverAddNotification(observer, axApp, kAXFocusedWindowChangedNotification as CFString, nil)
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         observers[pid] = observer
     }
@@ -346,7 +464,9 @@ final class WindowTile: NSView {
         imageView.frame = NSRect(x: 6, y: 24, width: frame.width - 12, height: frame.height - 30)
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.image = placeholder
-        imageView.alphaValue = ref.minimized ? 0.55 : 1
+        // Minimized windows show their last-seen picture slightly faded (or the app icon
+        // when none was captured), alongside the "(minimized)" label.
+        imageView.alphaValue = ref.minimized ? 0.7 : 1
 
         label.frame = NSRect(x: 6, y: 4, width: frame.width - 12, height: 16)
         label.font = .systemFont(ofSize: 11)
@@ -383,6 +503,7 @@ final class WindowTile: NSView {
 }
 
 final class WindowPreview {
+    let thumbnails = ThumbnailCache()
     private let panel: NSPanel
     private let background = NSVisualEffectView()
     private var tiles: [WindowTile] = []
@@ -487,13 +608,17 @@ final class WindowPreview {
         background.addSubview(title)
 
         let icon = app.icon
+        let skipCapture = app.isHidden
         for (index, window) in windows.enumerated() {
             let row = index / cols
             let col = index % cols
             let frame = NSRect(x: pad + CGFloat(col) * (tile.width + gap),
                                y: pad + CGFloat(rows - 1 - row) * (tile.height + gap),
                                width: tile.width, height: tile.height)
-            let view = WindowTile(window: window, placeholder: icon, frame: frame) { [weak self] picked, option in
+            // A minimized window shows how it looked when it was last on screen.
+            let lastSeen = window.minimized && !skipCapture
+                ? thumbnails.image(for: window.id).map { NSImage(cgImage: $0, size: .zero) } : nil
+            let view = WindowTile(window: window, placeholder: lastSeen ?? icon, frame: frame) { [weak self] picked, option in
                 self?.pick(picked, of: app, toggleMinimize: option)
             }
             background.addSubview(view)
@@ -517,15 +642,21 @@ final class WindowPreview {
         panel.invalidateShadow()
         startTracking()
 
-        // Capture thumbnails off the main thread, then swap them in. Minimized windows and
-        // hidden apps keep the app icon: minimized windows aren't reliably capturable, and a
-        // hidden app's windows were deliberately put out of sight.
-        let skipCapture = app.isHidden
+        // Capture thumbnails off the main thread, then swap them in, and remember each one for
+        // when that window is later minimized. Minimized windows aren't reliably capturable, so
+        // they keep the cached picture set above. Hidden apps keep the app icon: their windows
+        // were deliberately put out of sight.
         let ids = windows.map { skipCapture || $0.minimized ? nil : $0.id }
+        let pid = app.processIdentifier
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             let images = ids.map { id in id.flatMap(captureWindow) }
+            let small = images.map { $0.map { downscaled($0) } }
             DispatchQueue.main.async {
-                guard let self, self.generation == thisGeneration else { return }
+                guard let self else { return }
+                for (id, image) in zip(ids, small) {
+                    if let id, let image { self.thumbnails.store(image, for: id, pid: pid) }
+                }
+                guard self.generation == thisGeneration else { return }
                 for (tile, image) in zip(self.tiles, images) {
                     if let image { tile.setThumbnail(NSImage(cgImage: image, size: .zero)) }
                 }
@@ -544,6 +675,7 @@ final class WindowPreview {
     private func pick(_ window: WindowRef, of app: NSRunningApplication, toggleMinimize: Bool) {
         hide()
         if toggleMinimize {
+            if !window.minimized && !app.isHidden { thumbnails.captureNow(window.element) } // picture for later
             axSet(window.element, kAXMinimizedAttribute, !window.minimized)
             if !window.minimized { focusNextWindowIfNoneLeft(after: app) }
             return
@@ -673,6 +805,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
                 if let frame { s.lastPreviewFrame = frame }
             }
         }
+        migrateLegacySettings()
         defaults.register(defaults: ["doubleClickToggle": true, "hoverPreviews": true])
         setUpMenu()
         // Screen Recording is requested later, only when a hover preview is about to appear.
@@ -685,6 +818,17 @@ final class DockPlus: NSObject, NSApplicationDelegate {
                 timer.invalidate()
                 self?.start()
             }
+        }
+    }
+
+    /// Copies settings saved under the old bundle ID, local.dockplus. Never overwrites a
+    /// setting saved under the current ID, so it's safe on every launch. Must run before
+    /// defaults are registered. (Accessibility, Screen Recording and Open at Login are tied
+    /// to the ID by macOS and can't be carried over.)
+    private func migrateLegacySettings() {
+        guard let old = defaults.persistentDomain(forName: "local.dockplus") else { return }
+        for key in ["doubleClickToggle", "hoverPreviews"] where defaults.object(forKey: key) == nil {
+            if let value = old[key] { defaults.set(value, forKey: key) }
         }
     }
 
@@ -704,6 +848,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             self.tracker.forget(app.processIdentifier)
+            self.preview.thumbnails.forget(app.processIdentifier)
             if self.preview.shownPID == app.processIdentifier { self.preview.hide() }
         }
         // Keep the hovered app's snapshot current while the pointer rests on its icon.
@@ -721,6 +866,27 @@ final class DockPlus: NSObject, NSApplicationDelegate {
             let current = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier
             if current != self.dockPID || self.dockList == nil { self.attachToDock() } else { self.readMagnification() }
         }
+    }
+
+    // MARK: Last-seen thumbnails
+
+    /// Caches a picture of an on-screen window, for when it is later minimized. Skipped while
+    /// hover previews are off or Screen Recording isn't granted.
+    func cacheThumbnail(of window: AXUIElement, after delay: TimeInterval = 0) {
+        guard hoverEnabled, CGPreflightScreenCaptureAccess() else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.hoverEnabled else { return }
+            if let app = NSRunningApplication(processIdentifier: axPID(window)), app.isHidden { return }
+            self.preview.thumbnails.refresh(window)
+        }
+    }
+
+    /// A click outside the Dock: refresh the picture of the window under the pointer.
+    /// A click on a window's minimize button lands here on mouse-down, before the window
+    /// minimizes on mouse-up, so the cached picture is how the window looked at that moment.
+    private func cacheWindow(at point: CGPoint) {
+        guard hoverEnabled, CGPreflightScreenCaptureAccess() else { return }
+        preview.thumbnails.refreshWindow(at: point)
     }
 
     // MARK: Dock
@@ -864,7 +1030,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
             self.preview.show(app: app, anchor: frame, dockFrame: self.tapState.with { $0.dockListFrame })
         }
         pendingShow = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + (preview.isVisible ? 0.05 : 0.35), execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (preview.isVisible ? 0.2 : 0.35), execute: work)
     }
 
     /// Right-click or Control-click on a Dock icon: the Dock is opening that icon's menu, so
@@ -990,7 +1156,11 @@ final class DockPlus: NSObject, NSApplicationDelegate {
                 return nil
             }
             return hovered
-        }) else { return pass }
+        }) else {
+            let point = event.location
+            DispatchQueue.main.async { self.cacheWindow(at: point) }
+            return pass
+        }
 
         DispatchQueue.main.async {
             self.pendingShow?.cancel()
@@ -1051,6 +1221,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         }
         if let window = before.visibleWindow {
             if before.wasFrontmost {
+                if hoverEnabled { preview.thumbnails.captureNow(window) } // picture for the hover panel
                 axSet(window, kAXMinimizedAttribute, true)  // it was in use → minimize it
                 focusNextWindowIfNoneLeft(after: app)
             } else {
@@ -1118,7 +1289,10 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         let value = !defaults.bool(forKey: key)
         defaults.set(value, forKey: key)
         sender.state = value ? .on : .off
-        if key == "hoverPreviews" && !value { preview.hide() }
+        if key == "hoverPreviews" && !value {
+            preview.hide()
+            preview.thumbnails.removeAll() // no window pictures are kept while previews are off
+        }
     }
 
     @objc private func toggleLogin(_ sender: NSMenuItem) {
