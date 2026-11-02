@@ -270,7 +270,8 @@ final class ThumbnailCache {
     func image(for id: CGWindowID) -> CGImage? { entries[id]?.image }
 
     func store(_ image: CGImage, for id: CGWindowID, pid: pid_t) {
-        guard id != 0 else { return }
+        // A capture can finish after its app quit and was forgotten; don't keep it then.
+        guard id != 0, let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
         counter += 1
         entries[id] = (pid, image, counter)
         if entries.count > Self.limit, let oldest = entries.min(by: { $0.value.stamp < $1.value.stamp }) {
@@ -281,6 +282,14 @@ final class ThumbnailCache {
     func forget(_ pid: pid_t) {
         entries = entries.filter { $0.value.pid != pid }
     }
+
+    /// Drops every picture, e.g. when hover previews are turned off.
+    func removeAll() {
+        entries.removeAll()
+        lastClickCapture = .distantPast
+    }
+
+    private var lastClickCapture = Date.distantPast
 
     /// Captures a window now, on the calling (main) thread. Used right before DockPlus itself
     /// minimizes a window, so the cached image is exactly what was on screen.
@@ -294,6 +303,9 @@ final class ThumbnailCache {
     /// Captures the normal app window under a screen point (Quartz coordinates), off the main
     /// thread. Uses only the window server, never Accessibility, since it runs on every click.
     func refreshWindow(at point: CGPoint) {
+        // At most one click capture per half second, so rapid clicking stays cheap.
+        guard Date().timeIntervalSince(lastClickCapture) > 0.5 else { return }
+        lastClickCapture = Date()
         let me = getpid()
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
@@ -320,7 +332,10 @@ final class ThumbnailCache {
     func refresh(_ window: AXUIElement) {
         var id: CGWindowID = 0
         _ = SPI.axGetWindow?(window, &id)
-        guard id != 0, CGPreflightScreenCaptureAccess(), axBool(window, kAXMinimizedAttribute) != true else { return }
+        // Only standard windows: sheets, panels and dialogs would just use up cache slots.
+        guard id != 0, CGPreflightScreenCaptureAccess(),
+              axString(window, kAXSubroleAttribute) == kAXStandardWindowSubrole,
+              axBool(window, kAXMinimizedAttribute) != true else { return }
         let pid = axPID(window)
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let image = captureWindow(id).map({ downscaled($0) }) else { return }
@@ -1216,7 +1231,10 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         let value = !defaults.bool(forKey: key)
         defaults.set(value, forKey: key)
         sender.state = value ? .on : .off
-        if key == "hoverPreviews" && !value { preview.hide() }
+        if key == "hoverPreviews" && !value {
+            preview.hide()
+            preview.thumbnails.removeAll() // no window pictures are kept while previews are off
+        }
     }
 
     @objc private func toggleLogin(_ sender: NSMenuItem) {
