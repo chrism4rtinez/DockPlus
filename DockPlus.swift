@@ -645,17 +645,14 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Earlier builds used the bundle ID local.dockplus, so their settings live in that
-    /// domain. Copy them over once, so switching IDs keeps the user's choices. (Accessibility,
-    /// Screen Recording and Open at Login are tied to the ID by macOS and can't be carried over.)
+    /// Copies settings saved under the old bundle ID, local.dockplus. Never overwrites a
+    /// setting saved under the current ID, so it's safe on every launch. Must run before
+    /// defaults are registered. (Accessibility, Screen Recording and Open at Login are tied
+    /// to the ID by macOS and can't be carried over.)
     private func migrateLegacySettings() {
-        guard !defaults.bool(forKey: "migratedLegacySettings") else { return }
-        defaults.set(true, forKey: "migratedLegacySettings")
-        let legacy = "local.dockplus" as CFString
+        guard let old = defaults.persistentDomain(forName: "local.dockplus") else { return }
         for key in ["doubleClickToggle", "hoverPreviews"] where defaults.object(forKey: key) == nil {
-            if let value = CFPreferencesCopyAppValue(key as CFString, legacy) as? Bool {
-                defaults.set(value, forKey: key)
-            }
+            if let value = old[key] { defaults.set(value, forKey: key) }
         }
     }
 
