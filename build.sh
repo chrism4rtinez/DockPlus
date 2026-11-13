@@ -44,7 +44,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 xcrun swiftc -O -swift-version 5 -target arm64-apple-macos14.0 DockPlus.swift -o "$APP/Contents/MacOS/DockPlus"
 
 # App icon: every size macOS asks for, made from the one 1024 x 1024 master in Icon/.
-# The master already follows Apple's icon grid (artwork inside the central 824 x 824).
+# The master follows Apple's icon grid: a rounded tile in the central 824 x 824.
 ICON_SRC="Icon/AppIcon-1024.png"
 ICONSET_DIR="$(mktemp -d)"
 ICONSET="$ICONSET_DIR/AppIcon.iconset"
