@@ -1,0 +1,44 @@
+# Builds DockPlus on Apple silicon for every pull request and push to main, so a change
+# that breaks the build shows up before it's merged. The app is ad-hoc signed (build.sh's
+# default): no certificates or notarization credentials are involved, and no secrets are used.
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only token: this job only checks out and compiles.
+permissions:
+  contents: read
+
+# A newer push to the same PR cancels the build still running for the older one.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # macos-15 runs on Apple silicon (arm64), the only architecture DockPlus supports.
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      # Pinned to a commit rather than a tag, so a moved tag can't change what runs here.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcrun swiftc --version
+
+      - name: Build (ad-hoc signed)
+        run: ./build.sh
+
+      - name: Check the binary is arm64
+        run: |
+          ARCHS="$(lipo -archs DockPlus.app/Contents/MacOS/DockPlus)"
+          echo "Architectures: $ARCHS"
+          [[ "$ARCHS" == "arm64" ]]
