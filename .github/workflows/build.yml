@@ -42,3 +42,13 @@ jobs:
           ARCHS="$(lipo -archs DockPlus.app/Contents/MacOS/DockPlus)"
           echo "Architectures: $ARCHS"
           [[ "$ARCHS" == "arm64" ]]
+
+      - name: Check the app icon is in the bundle
+        run: |
+          ICON="DockPlus.app/Contents/Resources/AppIcon.icns"
+          [[ -s "$ICON" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' DockPlus.app/Contents/Info.plist)" == "AppIcon" ]]
+          # iconutil turns the .icns back into an iconset: all 10 sizes must be there.
+          iconutil --convert iconset --output "$RUNNER_TEMP/check.iconset" "$ICON"
+          ls "$RUNNER_TEMP/check.iconset"
+          [[ "$(ls "$RUNNER_TEMP/check.iconset" | wc -l)" -eq 10 ]]
