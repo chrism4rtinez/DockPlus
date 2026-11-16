@@ -347,9 +347,10 @@ final class DockPlus: NSObject, NSApplicationDelegate {
 
     /// Whether the Dock's icons are on screen. An automatically hidden Dock slides its icon list
     /// off the edge of the screen, so once most of the list is off screen it counts as hidden.
-    /// Asks the Dock only.
+    /// If the Dock can't be read, it counts as shown, so the panel falls back to closing when
+    /// the pointer leaves it. Asks the Dock only.
     private func dockIsShown() -> Bool {
-        guard let list = dockList, let frame = axFrame(list), frame.width > 0, frame.height > 0 else { return false }
+        guard let list = dockList, let frame = axFrame(list), frame.width > 0, frame.height > 0 else { return true }
         let primaryHeight = NSScreen.screens.first?.frame.maxY ?? 0
         let onScreen = NSScreen.screens.reduce(CGFloat(0)) { total, screen in
             let f = screen.frame // Cocoa coordinates; the Dock's frame is in Quartz coordinates
