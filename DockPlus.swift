@@ -41,8 +41,9 @@
 //   • The hover panel is excluded from screen sharing where macOS honors that, and never
 //     captures the windows of hidden apps.
 //   • For those minimized-window pictures, DockPlus keeps a small, downscaled thumbnail of a
-//     window when it is clicked, focused, or shown in the panel (at most 64, in memory only,
-//     dropped when the app quits). This only happens while hover previews are on.
+//     window when it is clicked, focused, or shown in the panel (one per window, at most 64,
+//     in memory only). Each is dropped after the lifetime the user chose (1 hour by default),
+//     or when its app quits. This only happens while hover previews are on.
 //   • Nothing asks for a permission at launch. A setup window explains each permission first
 //     and asks only when the user presses its button; Screen Recording is optional.
 //   • DockPlus only runs (event tap, Dock and app observers) once setup is finished and
@@ -306,20 +307,50 @@ func downscaled(_ image: CGImage, maxSize: CGSize = CGSize(width: 440, height: 3
 /// The last thumbnail captured of each window while it was on screen. A minimized window
 /// can't be captured reliably, so the hover panel shows what it looked like when it was
 /// last seen, ideally just before it was minimized. Main thread only; kept in memory only,
-/// downscaled, and limited in number.
+/// downscaled, one per window, limited in number, and dropped once older than the lifetime
+/// the user chose ("thumbnailLifetime").
 final class ThumbnailCache {
     private static let limit = 64
-    private var entries: [CGWindowID: (pid: pid_t, image: CGImage, stamp: UInt64)] = [:]
+    private var entries: [CGWindowID: (pid: pid_t, image: CGImage, stamp: UInt64, captured: UInt64)] = [:]
     private var counter: UInt64 = 0
 
-    func image(for id: CGWindowID) -> CGImage? { entries[id]?.image }
+    /// Choices offered for how long a picture is kept, in seconds; 0 keeps it until the app
+    /// quits (or DockPlus does).
+    static let lifetimes: [(seconds: Int, title: String)] = [
+        (5 * 60, "5 Minutes"),
+        (15 * 60, "15 Minutes"),
+        (60 * 60, "1 Hour"),
+        (24 * 60 * 60, "1 Day"),
+        (0, "Until the App Quits"),
+    ]
+    static let defaultLifetime = 60 * 60
+
+    /// Seconds since an arbitrary point, counting time asleep and unaffected by clock changes,
+    /// so a picture expires on time even across sleep or a changed system clock.
+    private static func now() -> UInt64 { clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1_000_000_000 }
+
+    private var lifetime: UInt64 { UInt64(max(0, UserDefaults.standard.integer(forKey: "thumbnailLifetime"))) }
+
+    func image(for id: CGWindowID) -> CGImage? {
+        removeExpired()
+        return entries[id]?.image
+    }
+
+    /// Drops pictures older than the chosen lifetime. Runs every 2 seconds, when the lifetime
+    /// is changed, and before any picture is shown.
+    func removeExpired() {
+        let lifetime = self.lifetime
+        guard lifetime > 0, !entries.isEmpty else { return }
+        let now = Self.now()
+        entries = entries.filter { now - $0.value.captured < lifetime }
+    }
 
     func store(_ image: CGImage, for id: CGWindowID, pid: pid_t) {
         // A capture can finish after its app quit or previews were turned off; don't keep it then.
         guard id != 0, UserDefaults.standard.bool(forKey: "hoverPreviews"),
               let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else { return }
         counter += 1
-        entries[id] = (pid, image, counter)
+        entries[id] = (pid, image, counter, Self.now())
         if entries.count > Self.limit, let oldest = entries.min(by: { $0.value.stamp < $1.value.stamp }) {
             entries[oldest.key] = nil
         }
@@ -820,7 +851,8 @@ final class DockPlus: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         migrateLegacySettings()
-        defaults.register(defaults: ["doubleClickToggle": true, "hoverPreviews": true])
+        defaults.register(defaults: ["doubleClickToggle": true, "hoverPreviews": true,
+                                     "thumbnailLifetime": ThumbnailCache.defaultLifetime])
         setUpMenu()
         couldCapture = CGPreflightScreenCaptureAccess()
 
@@ -864,6 +896,7 @@ final class DockPlus: NSObject, NSApplicationDelegate, NSMenuDelegate {
             preview.thumbnails.removeAll()
         }
         couldCapture = canCapture
+        preview.thumbnails.removeExpired()
         updateStatusIcon(needsAttention: !trusted || !setupComplete || tapFailed)
         setup?.refresh()
     }
@@ -1444,6 +1477,7 @@ final class DockPlus: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(toggleItem("Double-click icon: minimize / restore window", key: "doubleClickToggle"))
         menu.addItem(toggleItem("Hover icon: show all windows", key: "hoverPreviews"))
+        menu.addItem(lifetimeMenu())
         menu.addItem(.separator())
 
         // Permission status. Each row opens the place to change it.
@@ -1502,6 +1536,30 @@ final class DockPlus: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func isSettingOn(_ key: String) -> Bool { defaults.bool(forKey: key) }
+
+    var thumbnailLifetime: Int { defaults.integer(forKey: "thumbnailLifetime") }
+
+    /// How long window pictures are kept. A shorter time drops older pictures right away.
+    func setThumbnailLifetime(_ seconds: Int) {
+        defaults.set(seconds, forKey: "thumbnailLifetime")
+        preview.thumbnails.removeExpired()
+    }
+
+    private func lifetimeMenu() -> NSMenuItem {
+        let item = NSMenuItem(title: "Keep Window Pictures For", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        for choice in ThumbnailCache.lifetimes {
+            let option = actionItem(choice.title, #selector(chooseLifetime(_:)),
+                                    state: choice.seconds == thumbnailLifetime ? .on : .off)
+            option.tag = choice.seconds
+            submenu.addItem(option)
+        }
+        item.submenu = submenu
+        item.isEnabled = defaults.bool(forKey: "hoverPreviews") // no pictures are kept otherwise
+        return item
+    }
+
+    @objc private func chooseLifetime(_ sender: NSMenuItem) { setThumbnailLifetime(sender.tag) }
 
     @objc private func openSetup() { showSetup(at: .welcome) }
     @objc private func openSetupAtAccessibility() { showSetup(at: .accessibility) }
@@ -1634,7 +1692,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
             add(text("DockPlus adds two things to your Dock: double-click an app's icon to minimize or restore its window, and hover over it to see all of its windows."))
             add(text("To do that it needs two permissions, which the next steps explain. You choose whether to allow each one, and you can change your mind at any time in System Settings."))
             add(heading("Your privacy"))
-            add(text("DockPlus never connects to the internet. It saves nothing except your settings. Window pictures for the hover preview stay in memory and are gone when DockPlus quits."))
+            add(text("DockPlus never connects to the internet. It saves nothing except your settings. Window pictures for the hover preview stay in memory, are deleted after the time you choose (1 hour unless you change it), and are gone when DockPlus quits."))
             nextButton.title = "Continue"
 
         case .accessibility:
@@ -1663,6 +1721,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
                          on: app.isSettingOn("doubleClickToggle"), #selector(toggleDoubleClick(_:))))
             add(checkbox("Hover over a Dock icon to show all of its windows",
                          on: app.isSettingOn("hoverPreviews"), #selector(toggleHover(_:))))
+            add(lifetimeRow())
             add(checkbox("Open DockPlus when you log in",
                          on: app.opensAtLogin, #selector(toggleLogin(_:))))
             add(note("You can change these later from the DockPlus menu in the menu bar."))
@@ -1713,6 +1772,9 @@ final class SetupWindow: NSObject, NSWindowDelegate {
     @objc private func allowScreenRecording() { app.requestScreenRecording() }
     @objc private func toggleDoubleClick(_ sender: NSButton) { app.setSetting("doubleClickToggle", sender.state == .on) }
     @objc private func toggleHover(_ sender: NSButton) { app.setSetting("hoverPreviews", sender.state == .on) }
+    @objc private func chooseLifetime(_ sender: NSPopUpButton) {
+        app.setThumbnailLifetime(sender.selectedTag())
+    }
     @objc private func toggleLogin(_ sender: NSButton) {
         app.setOpenAtLogin(sender.state == .on)
         sender.state = app.opensAtLogin ? .on : .off
@@ -1768,6 +1830,26 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         let box = NSButton(checkboxWithTitle: title, target: self, action: action)
         box.state = on ? .on : .off
         return box
+    }
+
+    /// "Keep window pictures for [1 Hour]", for minimized windows in the hover preview.
+    private func lifetimeRow() -> NSView {
+        let label = NSTextField(labelWithString: "Keep pictures of minimized windows for")
+        label.font = .systemFont(ofSize: 13)
+        let popUp = NSPopUpButton(frame: .zero, pullsDown: false)
+        for choice in ThumbnailCache.lifetimes {
+            popUp.addItem(withTitle: choice.title)
+            popUp.lastItem?.tag = choice.seconds
+        }
+        popUp.selectItem(withTag: app.thumbnailLifetime)
+        popUp.target = self
+        popUp.action = #selector(chooseLifetime(_:))
+        let row = NSStackView(views: [label, popUp])
+        row.orientation = .horizontal
+        row.spacing = 8
+        // Indented under the hover checkbox it belongs to.
+        row.edgeInsets = NSEdgeInsets(top: 0, left: 20, bottom: 0, right: 0)
+        return row
     }
 
     private func addStatus() {
