@@ -68,8 +68,15 @@ final class WindowPreview {
     private var outsideSince: Date?
     private var generation = 0
     private(set) var shownPID: pid_t?
+    // Set while the panel was opened from the keyboard: it stays open while this returns true,
+    // even with the pointer elsewhere.
+    private var keepOpen: (() -> Bool)?
+    var openedFromKeyboard: Bool { panel.isVisible && keepOpen != nil }
     /// Called with the panel's frame in Quartz coordinates when it appears, and nil when it hides.
     var onFrameChange: ((CGRect?) -> Void)?
+    /// Whether the Dock is on screen. Unless the pointer is on the panel, the panel closes as
+    /// soon as this turns false, when an automatically hidden Dock starts to slide away.
+    var dockIsShown: (() -> Bool)?
 
     var isVisible: Bool { panel.isVisible }
 
@@ -107,9 +114,14 @@ final class WindowPreview {
         return image
     }
 
-    func show(app: NSRunningApplication, anchor quartzAnchor: CGRect, dockFrame: CGRect?) {
+    /// Shows the panel for `app` next to its Dock icon. Opened from a hover, it closes once the
+    /// pointer has left the icon and the panel. Opened from the keyboard, pass `keepOpen`: the
+    /// panel then also stays open while that returns true (the Dock still has that icon focused).
+    func show(app: NSRunningApplication, anchor quartzAnchor: CGRect, dockFrame: CGRect?,
+              keepOpen: (() -> Bool)? = nil) {
         let windows = appWindows(app)
         guard !windows.isEmpty else { hide(); return }
+        self.keepOpen = keepOpen
         generation += 1
         let thisGeneration = generation
         shownPID = app.processIdentifier
@@ -223,6 +235,7 @@ final class WindowPreview {
         generation += 1
         panel.orderOut(nil)
         shownPID = nil
+        keepOpen = nil
         stopTracking()
         onFrameChange?(nil)
     }
@@ -245,7 +258,15 @@ final class WindowPreview {
         }
     }
 
-    // Close the panel once the pointer has left both the icon and the panel for a moment.
+    /// Re-checks at once whether the panel should still be open, instead of at the next tick.
+    func recheck() {
+        guard panel.isVisible else { return }
+        checkPointer()
+    }
+
+    // The panel stays open while the pointer is on it. Otherwise it closes as soon as the Dock
+    // hides, and once the pointer has left both the icon and the panel for a moment. A panel
+    // opened from the keyboard closes as soon as the Dock no longer has that icon focused.
     private func startTracking() {
         outsideSince = nil
         guard trackTimer == nil else { return }
@@ -264,13 +285,23 @@ final class WindowPreview {
         guard panel.isVisible else { stopTracking(); return }
         let pointer = NSEvent.mouseLocation
         let frame = panel.frame
+        // The pointer on the panel always keeps it open, even while the Dock hides.
+        if frame.insetBy(dx: -6, dy: -6).contains(pointer) {
+            outsideSince = nil
+            return
+        }
+        if dockIsShown?() == false { hide(); return }
+        if let keepOpen {
+            if keepOpen() { outsideSince = nil } else { hide() }
+            return
+        }
         let bridge: NSRect // the icon plus the gap between it and the panel
         switch edge {
         case .minX: bridge = NSRect(x: anchor.minX, y: anchor.minY, width: frame.minX - anchor.minX, height: anchor.height)
         case .maxX: bridge = NSRect(x: frame.maxX, y: anchor.minY, width: anchor.maxX - frame.maxX, height: anchor.height)
         default: bridge = NSRect(x: anchor.minX, y: anchor.minY, width: anchor.width, height: frame.minY - anchor.minY)
         }
-        if frame.insetBy(dx: -6, dy: -6).contains(pointer) || bridge.insetBy(dx: -6, dy: -6).contains(pointer) {
+        if bridge.insetBy(dx: -6, dy: -6).contains(pointer) {
             outsideSince = nil
         } else if let since = outsideSince {
             if Date().timeIntervalSince(since) > 0.2 { hide() }

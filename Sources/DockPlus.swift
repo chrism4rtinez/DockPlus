@@ -11,12 +11,18 @@
 //     A minimized window shows how it looked when it was last on screen.
 //     Right-click or Control-click the icon to close the panel. It stays closed while the
 //     Dock's menu is open, and until the pointer moves to another icon or leaves the Dock.
+//     The same panel opens when the Dock is used from the keyboard (Fn/Globe-A or
+//     Control-F3, then the arrow keys) for the icon that has keyboard focus.
 //
 // How it works
 //   • The Dock's Accessibility tree marks the icon under the pointer as "selected", and an
 //     AXObserver on the Dock's icon list (kAXSelectedChildrenChangedNotification) fires
 //     whenever that changes. On each change DockPlus records the hovered app and the state
 //     of its windows, and after a short delay shows the hover panel.
+//   • When the Dock is used from the keyboard, it reports the icon with keyboard focus as its
+//     focused UI element (kAXFocusedUIElementChangedNotification on the Dock). DockPlus shows
+//     the panel for that icon and keeps it open while the icon stays focused. It reads this
+//     from the Dock's Accessibility tree only; it never watches the keyboard itself.
 //   • A CGEventTap on its own thread sees every left and right mouse-down before the Dock
 //     does. It only reads the state recorded on hover and never calls into other apps, so a
 //     hung app can't stall mouse input. On the second click of a double-click
@@ -118,6 +124,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
     // Main thread only
     private var dockPID: pid_t = 0
     private var dockList: AXUIElement?
+    private var dockApp: AXUIElement?
     private var dockObserver: AXObserver?
     private var pendingShow: DispatchWorkItem?
     private var pendingHandoff: DispatchWorkItem?
@@ -143,6 +150,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
                 if let frame { s.lastPreviewFrame = frame }
             }
         }
+        preview.dockIsShown = { [weak self] in self?.dockIsShown() ?? false }
         migrateLegacySettings()
         defaults.register(defaults: ["doubleClickToggle": true, "hoverPreviews": true,
                                      "thumbnailLifetime": ThumbnailCache.defaultLifetime])
@@ -179,6 +187,12 @@ final class DockPlus: NSObject, NSApplicationDelegate {
                 guard let self, self.started else { return }
                 self.tracker.watch(app)
             }
+        })
+        // Return or Space in a keyboard-focused Dock opens the app; the panel shouldn't linger.
+        workspaceObservers.append(center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.preview.openedFromKeyboard else { return }
+            self.pendingShow?.cancel()
+            self.preview.hide()
         })
         workspaceObservers.append(center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
@@ -221,6 +235,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
             dockObserver = nil
         }
         dockList = nil
+        dockApp = nil
         dockPID = 0
         suppressedItem = nil
         tracker.forgetAll()
@@ -260,6 +275,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
             dockObserver = nil
         }
         dockList = nil
+        dockApp = nil
         suppressedItem = nil
         tapState.with { s in
             s.hover = nil
@@ -273,14 +289,23 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         guard let list = axElements(dockElement, kAXChildrenAttribute)
             .first(where: { axString($0, kAXRoleAttribute) == kAXListRole }) else { return }
         dockList = list
+        dockApp = dockElement
         let listFrame = axFrame(list)
         tapState.with { $0.dockListFrame = listFrame }
         readMagnification()
 
         var observer: AXObserver?
-        let callback: AXObserverCallback = { _, _, _, _ in DockPlus.shared.dockSelectionChanged() }
+        let callback: AXObserverCallback = { _, _, notification, _ in
+            if notification as String == kAXFocusedUIElementChangedNotification {
+                DockPlus.shared.dockFocusChanged()
+            } else {
+                DockPlus.shared.dockSelectionChanged()
+            }
+        }
         guard AXObserverCreate(dockPID, callback, &observer) == .success, let observer else { return }
         AXObserverAddNotification(observer, list, kAXSelectedChildrenChangedNotification as CFString, nil)
+        // Keyboard navigation of the Dock (Fn/Globe-A, Control-F3) moves its focused element.
+        AXObserverAddNotification(observer, dockElement, kAXFocusedUIElementChangedNotification as CFString, nil)
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         dockObserver = observer
     }
@@ -303,6 +328,37 @@ final class DockPlus: NSObject, NSApplicationDelegate {
     private func hoveredDockItem() -> AXUIElement? {
         guard let list = dockList else { return nil }
         return axElements(list, kAXSelectedChildrenAttribute).first
+    }
+
+    /// The Dock icon with keyboard focus, while the Dock is used from the keyboard (Fn/Globe-A
+    /// or Control-F3, then the arrow keys), or nil. Only counts while the Dock is the app that
+    /// receives keystrokes, so an icon merely hovered with the pointer never qualifies. Asks the
+    /// system which app has keyboard focus and the Dock which icon; never the app behind it.
+    private func keyboardFocusedDockItem() -> AXUIElement? {
+        guard let dockApp, dockPID != 0,
+              let focusedApp = axElement(AXUIElementCreateSystemWide(), kAXFocusedApplicationAttribute),
+              axPID(focusedApp) == dockPID else { return nil }
+        if let focused = axElement(dockApp, kAXFocusedUIElementAttribute),
+           axString(focused, kAXRoleAttribute) == "AXDockItem" {
+            return focused
+        }
+        return hoveredDockItem() // the Dock also marks the focused icon as selected
+    }
+
+    /// Whether the Dock's icons are on screen. An automatically hidden Dock slides its icon list
+    /// off the edge of the screen, so once most of the list is off screen it counts as hidden.
+    /// If the Dock can't be read, it counts as shown, so the panel falls back to closing when
+    /// the pointer leaves it. Asks the Dock only.
+    private func dockIsShown() -> Bool {
+        guard let list = dockList, let frame = axFrame(list), frame.width > 0, frame.height > 0 else { return true }
+        let primaryHeight = NSScreen.screens.first?.frame.maxY ?? 0
+        let onScreen = NSScreen.screens.reduce(CGFloat(0)) { total, screen in
+            let f = screen.frame // Cocoa coordinates; the Dock's frame is in Quartz coordinates
+            let quartz = CGRect(x: f.minX, y: primaryHeight - f.maxY, width: f.width, height: f.height)
+            let overlap = quartz.intersection(frame)
+            return total + (overlap.isNull ? 0 : overlap.width * overlap.height)
+        }
+        return onScreen >= frame.width * frame.height * 0.75
     }
 
     private func runningApp(for item: AXUIElement) -> NSRunningApplication? {
@@ -388,6 +444,12 @@ final class DockPlus: NSObject, NSApplicationDelegate {
             suppressedItem = nil
         }
 
+        // The Dock is being used from the keyboard: follow its keyboard focus instead.
+        if let focused = keyboardFocusedDockItem() {
+            showForKeyboard(focused)
+            return
+        }
+
         guard let hover = found else {
             pendingShow?.cancel()
             return // the panel's own pointer tracking decides when to close
@@ -403,6 +465,46 @@ final class DockPlus: NSObject, NSApplicationDelegate {
                   let current = self.hoveredDockItem(), CFEqual(current, item),
                   let frame = axFrame(item) else { return }
             self.preview.show(app: app, anchor: frame, dockFrame: self.tapState.with { $0.dockListFrame })
+        }
+        pendingShow = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + (preview.isVisible ? 0.2 : 0.35), execute: work)
+    }
+
+    /// The Dock's keyboard focus moved: onto an icon, to another icon, or out of the Dock.
+    func dockFocusChanged() {
+        // When focus leaves the Dock (Esc, or Fn/Globe-A again), a panel opened from the
+        // keyboard closes right away, and one waiting to open doesn't, as the icon is no longer
+        // focused.
+        guard let item = keyboardFocusedDockItem() else {
+            if preview.openedFromKeyboard { preview.recheck() }
+            return
+        }
+        showForKeyboard(item)
+    }
+
+    /// Shows the panel for a Dock icon reached from the keyboard, after the same short delay as
+    /// a hover. The panel opens only if the Dock still has this icon focused by then, and stays
+    /// open while it does (or while the pointer is on it, as for a hover). It shows the same
+    /// thumbnails as a hover, under the same privacy rules: hidden apps aren't captured, the
+    /// thumbnail lifetime setting applies, and nothing shows while hover previews are off.
+    private func showForKeyboard(_ item: AXUIElement) {
+        guard hoverEnabled else { return }
+        let stillOnItem = { [weak self] () -> Bool in
+            self?.keyboardFocusedDockItem().map { CFEqual($0, item) } ?? false
+        }
+        guard let app = runningApp(for: item), app.processIdentifier != getpid() else {
+            // Not a running app (a folder, the Trash, an app that isn't open): nothing to show.
+            // An open panel closes on its next check, as the focus has moved off its icon.
+            pendingShow?.cancel()
+            return
+        }
+        if preview.openedFromKeyboard && preview.shownPID == app.processIdentifier { return }
+        pendingShow?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, stillOnItem(), let frame = axFrame(item) else { return }
+            self.preview.show(app: app, anchor: frame,
+                              dockFrame: self.tapState.with { $0.dockListFrame },
+                              keepOpen: stillOnItem)
         }
         pendingShow = work
         DispatchQueue.main.asyncAfter(deadline: .now() + (preview.isVisible ? 0.2 : 0.35), execute: work)
