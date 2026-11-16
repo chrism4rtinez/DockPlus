@@ -42,8 +42,8 @@
 //     captures the windows of hidden apps.
 //   • For those minimized-window pictures, DockPlus keeps a small, downscaled thumbnail of a
 //     window when it is clicked, focused, or shown in the panel (one per window, at most 64,
-//     in memory only). Each is dropped after the lifetime the user chose (1 hour by default),
-//     or when its app quits. This only happens while hover previews are on.
+//     in memory only). Each is dropped when its app quits, or sooner if the user chose a
+//     time limit. This only happens while hover previews are on.
 //   • Nothing asks for a permission at launch. A setup window explains each permission first
 //     and asks only when the user presses its button; Screen Recording is optional.
 //   • DockPlus only runs (event tap, Dock and app observers) once setup is finished and
@@ -323,7 +323,7 @@ final class ThumbnailCache {
         (24 * 60 * 60, "1 Day"),
         (0, "Until the App Quits"),
     ]
-    static let defaultLifetime = 60 * 60
+    static let defaultLifetime = 0 // until the app quits
 
     /// Seconds since an arbitrary point, counting time asleep and unaffected by clock changes,
     /// so a picture expires on time even across sleep or a changed system clock.
@@ -1692,7 +1692,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
             add(text("DockPlus adds two things to your Dock: double-click an app's icon to minimize or restore its window, and hover over it to see all of its windows."))
             add(text("To do that it needs two permissions, which the next steps explain. You choose whether to allow each one, and you can change your mind at any time in System Settings."))
             add(heading("Your privacy"))
-            add(text("DockPlus never connects to the internet. It saves nothing except your settings. Window pictures for the hover preview stay in memory, are deleted after the time you choose (1 hour unless you change it), and are gone when DockPlus quits."))
+            add(text("DockPlus never connects to the internet. It saves nothing except your settings. Window pictures for the hover preview stay in memory, are deleted when their app quits (or sooner, if you choose), and are gone when DockPlus quits."))
             nextButton.title = "Continue"
 
         case .accessibility:

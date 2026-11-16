@@ -12,5 +12,5 @@
 - **Permission status in the menu.** The DockPlus menu shows whether Accessibility and Screen Recording are allowed, and each line opens the right page of System Settings. The menu bar icon turns into a warning sign while DockPlus can't work.
 - If you turn off Accessibility for DockPlus while it's running, it stops watching clicks and the Dock right away, and picks up again when you turn it back on. Turning off Screen Recording drops any window pictures it kept in memory.
 - DockPlus no longer asks for Screen Recording the first time you hover over the Dock.
-- **Choose how long window pictures are kept.** The pictures DockPlus keeps to show minimized windows in the hover preview are now deleted after 1 hour by default. Change it under **Keep preview thumbnails for…** in the DockPlus menu, or in the setup guide: 5 minutes, 15 minutes, 1 hour, 1 day, or until the app quits (the old behavior).
+- **Choose how long preview thumbnails are kept.** The pictures DockPlus keeps to show minimized windows in the hover preview are kept until their app quits, as before. To delete them sooner, choose 5 minutes, 15 minutes, 1 hour or 1 day under **Keep preview thumbnails for…** in the DockPlus menu, or in the setup guide.
 - If Open at Login needs your approval in System Settings, DockPlus opens that page. If it fails, DockPlus tells you instead of failing silently.
