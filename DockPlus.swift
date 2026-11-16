@@ -1428,7 +1428,7 @@ final class DockPlus: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Menu bar
 
     private func setUpMenu() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         let menu = NSMenu()
         menu.delegate = self // rebuilt each time it opens, so permission status is current
         item.menu = menu
@@ -1436,19 +1436,49 @@ final class DockPlus: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateStatusIcon(needsAttention: false)
     }
 
-    /// The menu bar icon shows a warning symbol while DockPlus can't work: setup isn't
-    /// finished, Accessibility isn't allowed, or the event tap couldn't be created.
+    /// The app icon's glyph (a Dock outline with a plus above a bar), drawn as a template
+    /// image so macOS colors it for a light or dark menu bar. The numbers are the glyph's
+    /// measurements in Icon/AppIcon-1024.png before it was scaled onto its tile: an 824 x 650
+    /// shape with its top-left corner at (100, 187).
+    private static let menuBarIcon: NSImage = {
+        let image = NSImage(size: NSSize(width: 22, height: 18), flipped: true) { rect in
+            let scale = rect.width / 824
+            let transform = NSAffineTransform()
+            transform.translateX(by: 0, yBy: (rect.height - 650 * scale) / 2)
+            transform.scale(by: scale)
+            transform.translateX(by: -100, yBy: -187)
+            transform.concat()
+            NSColor.black.set()
+            let outline = NSBezierPath(roundedRect: NSRect(x: 133, y: 220, width: 758, height: 584),
+                                       xRadius: 117, yRadius: 117)
+            outline.lineWidth = 66
+            outline.stroke()
+            NSBezierPath(roundedRect: NSRect(x: 400, y: 397, width: 224, height: 64), xRadius: 32, yRadius: 32).fill()
+            NSBezierPath(roundedRect: NSRect(x: 480, y: 317, width: 64, height: 224), xRadius: 32, yRadius: 32).fill()
+            NSBezierPath(roundedRect: NSRect(x: 259, y: 605, width: 509, height: 109), xRadius: 28, yRadius: 28).fill()
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = "DockPlus"
+        return image
+    }()
+
+    /// The menu bar icon is the app icon's glyph. It becomes a warning symbol while DockPlus
+    /// can't work: setup isn't finished, Accessibility isn't allowed, or the event tap couldn't
+    /// be created.
     private func updateStatusIcon(needsAttention: Bool) {
         guard let button = statusItem?.button else { return }
-        let symbol = needsAttention ? "exclamationmark.triangle" : "dock.rectangle"
         let description = needsAttention ? "DockPlus needs attention" : "DockPlus"
-        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description) {
+        if !needsAttention {
+            button.image = Self.menuBarIcon
+            button.title = ""
+        } else if let image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: description) {
             image.isTemplate = true
             button.image = image
             button.title = ""
         } else {
             button.image = nil
-            button.title = needsAttention ? "Dock+ !" : "Dock+"
+            button.title = "Dock+ !"
         }
         button.toolTip = description
     }
