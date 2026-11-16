@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The app icon and the menu bar icon are now just the plus above the bar, without the rounded outline around them.
+
 ## 1.0 (2026-11-16)
 
 The first public release, as a signed and notarized disk image. The notes below are for anyone who ran an earlier build from source.
