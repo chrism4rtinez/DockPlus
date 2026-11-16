@@ -1546,7 +1546,7 @@ final class DockPlus: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func lifetimeMenu() -> NSMenuItem {
-        let item = NSMenuItem(title: "Keep Window Pictures For", action: nil, keyEquivalent: "")
+        let item = NSMenuItem(title: "Keep preview thumbnails for…", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
         for choice in ThumbnailCache.lifetimes {
             let option = actionItem(choice.title, #selector(chooseLifetime(_:)),
@@ -1832,9 +1832,9 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         return box
     }
 
-    /// "Keep window pictures for [1 Hour]", for minimized windows in the hover preview.
+    /// "Keep preview thumbnails for [1 Hour]", for minimized windows in the hover preview.
     private func lifetimeRow() -> NSView {
-        let label = NSTextField(labelWithString: "Keep pictures of minimized windows for")
+        let label = NSTextField(labelWithString: "Keep preview thumbnails for")
         label.font = .systemFont(ofSize: 13)
         let popUp = NSPopUpButton(frame: .zero, pullsDown: false)
         for choice in ThumbnailCache.lifetimes {
