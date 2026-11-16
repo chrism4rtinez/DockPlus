@@ -103,5 +103,5 @@ fi
 
 echo "Built $(pwd)/$APP $VERSION (Hardened Runtime on)"
 echo "Next: move it to /Applications and open it from Finder. Don't run the binary inside it"
-echo "from Terminal, or macOS will ask to give Terminal these permissions instead. Allow"
-echo "Accessibility, and Screen Recording when the first window preview asks for it."
+echo "from Terminal, or macOS will ask to give Terminal these permissions instead. The setup"
+echo "guide that opens walks you through Accessibility and (optionally) Screen Recording."
