@@ -67,7 +67,7 @@ macOS ties these permissions to the app's code signature. With the default ad-ho
 
 ## Building
 
-`build.sh` compiles `DockPlus.swift` with `swiftc` and assembles the app bundle, including its icon from `Icon/AppIcon-1024.png`. It accepts a few environment variables:
+`build.sh` compiles the Swift files in `Sources/` with `swiftc` and assembles the app bundle, including its icon from `Icon/AppIcon-1024.png`. It accepts a few environment variables:
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -98,13 +98,29 @@ Every pull request and push to `main` is built on Apple silicon by GitHub Action
 
 ## How it works
 
-DockPlus is a single Swift file, `DockPlus.swift`, with no dependencies.
+DockPlus is a handful of Swift files in `Sources/`, with no dependencies and no Xcode project:
+
+| File | What's in it |
+| --- | --- |
+| `DockPlus.swift` | The app: watching the Dock, the click event tap, double-click and hover handling. Design and security notes are at the top. |
+| `Permissions.swift` | Checking and requesting permissions, starting and stopping with them. |
+| `Menu.swift` | The menu bar icon and menu. |
+| `SetupWindow.swift` | The setup guide. |
+| `HoverPreview.swift` | The hover panel and its thumbnails. |
+| `ThumbnailCache.swift` | The in-memory pictures of recently seen windows. |
+| `MinimizeTracker.swift` | The order windows were minimized in. |
+| `Windows.swift` | Listing, focusing and capturing other apps' windows. |
+| `Accessibility.swift` | Small helpers for the Accessibility API. |
+| `PrivateAPIs.swift` | The private macOS calls and the version check that guards them. |
+| `main.swift` | The entry point. |
+
+In outline:
 
 - It watches the Dock's Accessibility tree, which marks the icon under the pointer as selected, to know which app you're hovering over.
 - A system-wide event tap sees mouse clicks before the Dock does. On the second click of a double-click on a running app's icon, it swallows that click and minimizes or restores a window. The tap only reads state recorded on hover and never calls into other apps, so a hung app can't stall your mouse.
 - Window thumbnails and focusing a specific window use private SkyLight APIs (the same ones [AltTab](https://github.com/lwouis/alt-tab-macos) and [DockDoor](https://github.com/ejbills/DockDoor) use), loaded at runtime and only on known macOS versions.
 
-See the comments at the top of `DockPlus.swift` for details.
+See the comments at the top of `Sources/DockPlus.swift` for details.
 
 ## Changes
 

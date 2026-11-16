@@ -16,3 +16,4 @@
 - DockPlus no longer asks for Screen Recording the first time you hover over the Dock.
 - **Choose how long preview thumbnails are kept.** The pictures DockPlus keeps to show minimized windows in the hover preview are kept until their app quits, as before. To delete them sooner, choose 5 minutes, 15 minutes, 1 hour or 1 day under **Keep preview thumbnails for…** in the DockPlus menu, or in the setup guide.
 - If Open at Login needs your approval in System Settings, DockPlus opens that page. If it fails, DockPlus tells you instead of failing silently.
+- The source is now split into several files in `Sources/` instead of one `DockPlus.swift`. Nothing changes in how DockPlus behaves or how you build it.
