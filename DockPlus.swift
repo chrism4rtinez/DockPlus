@@ -3,7 +3,8 @@
 // Two Dock behaviors macOS doesn't offer:
 //   • Double-click a running app's Dock icon → minimize its most recent window;
 //     double-click again → restore it (the most recently minimized window).
-//     Once an app has no windows left on screen, the next window in front gets focus.
+//     Once an app has no windows left on screen, the next window in front gets focus, or
+//     Finder when every window is minimized.
 //   • Hover a running app's Dock icon → a panel with thumbnails of all its windows.
 //     Click a thumbnail to focus that window (restoring it if minimized);
 //     ⌥-click a thumbnail to minimize / restore just that window.
@@ -217,12 +218,20 @@ func focusWindow(_ window: AXUIElement, of app: NSRunningApplication) {
 }
 
 /// If the frontmost app has no windows left on this Space, focuses the frontmost window of
-/// the next app in z-order, so focus doesn't stay on an app with nothing on screen.
+/// the next app in z-order, so focus doesn't stay on an app with nothing on screen. If no
+/// app has a window on screen any more, Finder (the desktop) gets focus instead.
 func focusNextWindowIfNoneLeft(in app: NSRunningApplication) {
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
           !app.isHidden,
-          !appWindows(app).contains(where: { !$0.minimized }),
-          let found = frontmostWindow(excluding: app.processIdentifier) else { return }
+          !appWindows(app).contains(where: { !$0.minimized }) else { return }
+    guard let found = frontmostWindow(excluding: app.processIdentifier) else {
+        // Every window is minimized. Activating Finder this way doesn't open a new window.
+        if let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first,
+           finder.processIdentifier != app.processIdentifier {
+            _ = finder.activate(options: [])
+        }
+        return
+    }
     let (next, window) = found
     if let window {
         focusWindow(window, of: next)
@@ -1737,7 +1746,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         add(highlight("cursorarrow.click.2", "Double-click to minimize and restore",
                       "Double-click a running app's Dock icon to minimize its most recent window. Double-click again to bring back the window you minimized last."))
         add(highlight("arrow.uturn.forward", "Focus follows minimize",
-                      "When you minimize an app's last window on screen, focus moves to the next window in front, so you can type in it right away."))
+                      "When you minimize an app's last window on screen, focus moves to the next window in front, so you can type in it right away. With every window minimized, focus goes to Finder."))
         add(highlight("macwindow.on.rectangle", "Hover for window previews",
                       "Rest the pointer on a running app's Dock icon to see a thumbnail of each of its windows. Click one to switch to it, or Option-click to minimize or restore just that window."))
 
