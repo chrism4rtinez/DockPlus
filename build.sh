@@ -38,10 +38,23 @@ if [[ -n "$NOTARY_PROFILE" && "$SIGN_ID" != "Developer ID Application"* ]]; then
 fi
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 # Apple silicon only: Intel Macs aren't supported.
 xcrun swiftc -O -swift-version 5 -target arm64-apple-macos14.0 DockPlus.swift -o "$APP/Contents/MacOS/DockPlus"
+
+# App icon: every size macOS asks for, made from the one 1024 x 1024 master in Icon/.
+# The master follows Apple's icon grid: a rounded tile in the central 824 x 824.
+ICON_SRC="Icon/AppIcon-1024.png"
+ICONSET_DIR="$(mktemp -d)"
+ICONSET="$ICONSET_DIR/AppIcon.iconset"
+mkdir "$ICONSET"
+for SIZE in 16 32 128 256 512; do
+    sips -z "$SIZE" "$SIZE" "$ICON_SRC" --out "$ICONSET/icon_${SIZE}x${SIZE}.png" >/dev/null
+    sips -z $((SIZE * 2)) $((SIZE * 2)) "$ICON_SRC" --out "$ICONSET/icon_${SIZE}x${SIZE}@2x.png" >/dev/null
+done
+iconutil --convert icns --output "$APP/Contents/Resources/AppIcon.icns" "$ICONSET"
+rm -rf "$ICONSET_DIR"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -51,6 +64,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>          <string>$BUNDLE_ID</string>
     <key>CFBundleName</key>                <string>DockPlus</string>
     <key>CFBundleExecutable</key>          <string>DockPlus</string>
+    <key>CFBundleIconFile</key>            <string>AppIcon</string>
     <key>CFBundlePackageType</key>         <string>APPL</string>
     <key>CFBundleShortVersionString</key>  <string>$VERSION</string>
     <key>CFBundleVersion</key>             <string>$BUILD_NUMBER</string>
@@ -89,5 +103,5 @@ fi
 
 echo "Built $(pwd)/$APP $VERSION (Hardened Runtime on)"
 echo "Next: move it to /Applications and open it from Finder. Don't run the binary inside it"
-echo "from Terminal, or macOS will ask to give Terminal these permissions instead. Allow"
-echo "Accessibility, and Screen Recording when the first window preview asks for it."
+echo "from Terminal, or macOS will ask to give Terminal these permissions instead. The setup"
+echo "guide that opens walks you through Accessibility and (optionally) Screen Recording."
