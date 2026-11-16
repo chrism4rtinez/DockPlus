@@ -3,7 +3,7 @@
 ## Unreleased
 
 - **Window previews from the keyboard.** When you move through the Dock with the keyboard (Fn-A / Globe-A or Control-F3, then the arrow keys), the window preview panel appears for the focused app, just as it does on hover. It closes as soon as you leave the Dock (Esc or Fn-A again), the Dock hides, or you open the app. DockPlus learns which icon is focused from the Dock's Accessibility information, not by watching the keyboard.
-- If the Dock hides automatically, the window preview panel now closes as soon as the Dock starts to hide, even with the pointer on the panel.
+- If the Dock hides automatically, the window preview panel now closes as soon as the Dock starts to hide. With the pointer on the panel, it stays open until you move off it.
 
 ## 1.0 (2026-11-16)
 
