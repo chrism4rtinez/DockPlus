@@ -8,7 +8,7 @@ DockPlus is a small menu bar app that adds Dock and window behaviors macOS doesn
   - Click a thumbnail to switch to that window (it's restored if it was minimized).
   - ⌥-click a thumbnail to minimize or restore just that window.
   - Right-click or Control-click the icon to close the panel and open the Dock's usual menu.
-  - The panel also appears when you use the Dock from the keyboard: press Fn-A (Globe-A) or Control-F3, then move between icons with the arrow keys. It stays open while that icon has keyboard focus.
+  - The panel also appears when you use the Dock from the keyboard: press Fn-A (Globe-A) or Control-F3, then move between icons with the arrow keys. It stays open while that icon has keyboard focus, and closes as soon as you leave the Dock or it hides.
 
 Double-click and hover previews can each be turned on and off from the DockPlus menu in the menu bar. Focus follows minimize is always on while DockPlus is running.
 

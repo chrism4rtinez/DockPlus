@@ -74,6 +74,9 @@ final class WindowPreview {
     var openedFromKeyboard: Bool { panel.isVisible && keepOpen != nil }
     /// Called with the panel's frame in Quartz coordinates when it appears, and nil when it hides.
     var onFrameChange: ((CGRect?) -> Void)?
+    /// Whether the Dock is on screen. A panel opened from the keyboard closes as soon as this
+    /// turns false, when an automatically hidden Dock starts to slide away.
+    var dockIsShown: (() -> Bool)?
 
     var isVisible: Bool { panel.isVisible }
 
@@ -255,8 +258,15 @@ final class WindowPreview {
         }
     }
 
-    // Close the panel once the pointer has left both the icon and the panel for a moment, and,
-    // for a panel opened from the keyboard, the Dock no longer has that icon focused.
+    /// Re-checks at once whether the panel should still be open, instead of at the next tick.
+    func recheck() {
+        guard panel.isVisible else { return }
+        checkPointer()
+    }
+
+    // Close the panel once the pointer has left both the icon and the panel for a moment.
+    // A panel opened from the keyboard closes as soon as the Dock hides or no longer has that
+    // icon focused, unless the pointer is on the panel.
     private func startTracking() {
         outsideSince = nil
         guard trackTimer == nil else { return }
@@ -275,14 +285,22 @@ final class WindowPreview {
         guard panel.isVisible else { stopTracking(); return }
         let pointer = NSEvent.mouseLocation
         let frame = panel.frame
+        if let keepOpen {
+            if dockIsShown?() == false { hide(); return }
+            if keepOpen() || frame.insetBy(dx: -6, dy: -6).contains(pointer) {
+                outsideSince = nil
+            } else {
+                hide()
+            }
+            return
+        }
         let bridge: NSRect // the icon plus the gap between it and the panel
         switch edge {
         case .minX: bridge = NSRect(x: anchor.minX, y: anchor.minY, width: frame.minX - anchor.minX, height: anchor.height)
         case .maxX: bridge = NSRect(x: frame.maxX, y: anchor.minY, width: anchor.maxX - frame.maxX, height: anchor.height)
         default: bridge = NSRect(x: anchor.minX, y: anchor.minY, width: anchor.width, height: frame.minY - anchor.minY)
         }
-        if frame.insetBy(dx: -6, dy: -6).contains(pointer) || bridge.insetBy(dx: -6, dy: -6).contains(pointer)
-            || keepOpen?() == true {
+        if frame.insetBy(dx: -6, dy: -6).contains(pointer) || bridge.insetBy(dx: -6, dy: -6).contains(pointer) {
             outsideSince = nil
         } else if let since = outsideSince {
             if Date().timeIntervalSince(since) > 0.2 { hide() }

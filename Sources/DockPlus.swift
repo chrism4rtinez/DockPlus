@@ -150,6 +150,7 @@ final class DockPlus: NSObject, NSApplicationDelegate {
                 if let frame { s.lastPreviewFrame = frame }
             }
         }
+        preview.dockIsShown = { [weak self] in self?.dockIsShown() ?? false }
         migrateLegacySettings()
         defaults.register(defaults: ["doubleClickToggle": true, "hoverPreviews": true,
                                      "thumbnailLifetime": ThumbnailCache.defaultLifetime])
@@ -344,6 +345,21 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         return hoveredDockItem() // the Dock also marks the focused icon as selected
     }
 
+    /// Whether the Dock's icons are on screen. An automatically hidden Dock slides its icon list
+    /// off the edge of the screen, so once most of the list is off screen it counts as hidden.
+    /// Asks the Dock only.
+    private func dockIsShown() -> Bool {
+        guard let list = dockList, let frame = axFrame(list), frame.width > 0, frame.height > 0 else { return false }
+        let primaryHeight = NSScreen.screens.first?.frame.maxY ?? 0
+        let onScreen = NSScreen.screens.reduce(CGFloat(0)) { total, screen in
+            let f = screen.frame // Cocoa coordinates; the Dock's frame is in Quartz coordinates
+            let quartz = CGRect(x: f.minX, y: primaryHeight - f.maxY, width: f.width, height: f.height)
+            let overlap = quartz.intersection(frame)
+            return total + (overlap.isNull ? 0 : overlap.width * overlap.height)
+        }
+        return onScreen >= frame.width * frame.height * 0.75
+    }
+
     private func runningApp(for item: AXUIElement) -> NSRunningApplication? {
         guard axString(item, kAXSubroleAttribute) == "AXApplicationDockItem",
               let nsurl = axValue(item, kAXURLAttribute) as? NSURL else { return nil }
@@ -455,9 +471,13 @@ final class DockPlus: NSObject, NSApplicationDelegate {
 
     /// The Dock's keyboard focus moved: onto an icon, to another icon, or out of the Dock.
     func dockFocusChanged() {
-        // When focus leaves the Dock, a panel opened from the keyboard closes on its next check,
-        // and one waiting to open doesn't, as the icon is no longer focused.
-        guard let item = keyboardFocusedDockItem() else { return }
+        // When focus leaves the Dock (Esc, or Fn/Globe-A again), a panel opened from the
+        // keyboard closes right away, and one waiting to open doesn't, as the icon is no longer
+        // focused.
+        guard let item = keyboardFocusedDockItem() else {
+            if preview.openedFromKeyboard { preview.recheck() }
+            return
+        }
         showForKeyboard(item)
     }
 
