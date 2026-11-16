@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Window previews from the keyboard.** When you move through the Dock with the keyboard (Fn-A / Globe-A or Control-F3, then the arrow keys), the window preview panel appears for the focused app, just as it does on hover. It closes when you leave the Dock or open the app. DockPlus learns which icon is focused from the Dock's Accessibility information, not by watching the keyboard.
+
 ## 1.0 (2026-11-16)
 
 The first public release, as a signed and notarized disk image. The notes below are for anyone who ran an earlier build from source.

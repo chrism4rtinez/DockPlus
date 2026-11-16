@@ -8,6 +8,7 @@ DockPlus is a small menu bar app that adds Dock and window behaviors macOS doesn
   - Click a thumbnail to switch to that window (it's restored if it was minimized).
   - ⌥-click a thumbnail to minimize or restore just that window.
   - Right-click or Control-click the icon to close the panel and open the Dock's usual menu.
+  - The panel also appears when you use the Dock from the keyboard: press Fn-A (Globe-A) or Control-F3, then move between icons with the arrow keys. It stays open while that icon has keyboard focus.
 
 Double-click and hover previews can each be turned on and off from the DockPlus menu in the menu bar. Focus follows minimize is always on while DockPlus is running.
 
@@ -122,6 +123,7 @@ DockPlus is a handful of Swift files in `Sources/`, with no dependencies and no 
 In outline:
 
 - It watches the Dock's Accessibility tree, which marks the icon under the pointer as selected, to know which app you're hovering over.
+- When you use the Dock from the keyboard, it reads which icon has keyboard focus from the same Accessibility tree. DockPlus doesn't watch your keystrokes to do this.
 - A system-wide event tap sees mouse clicks before the Dock does. On the second click of a double-click on a running app's icon, it swallows that click and minimizes or restores a window. The tap only reads state recorded on hover and never calls into other apps, so a hung app can't stall your mouse.
 - Window thumbnails and focusing a specific window use private SkyLight APIs (the same ones [AltTab](https://github.com/lwouis/alt-tab-macos) and [DockDoor](https://github.com/ejbills/DockDoor) use), loaded at runtime and only on known macOS versions.
 
