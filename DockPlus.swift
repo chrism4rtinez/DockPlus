@@ -860,9 +860,9 @@ final class DockPlus: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // asks only when the user presses its button. DockPlus starts working (event tap, Dock
         // and app observers) only once setup is finished and Accessibility is allowed.
         if !setupComplete {
-            showSetup(at: .welcome)
+            showSetup(.welcome)
         } else if !AXIsProcessTrusted() {
-            showSetup(at: .accessibility)
+            showSetup(.setup)
         }
         checkPermissions()
         // Permissions can be granted or taken away in System Settings at any time.
@@ -901,11 +901,11 @@ final class DockPlus: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setup?.refresh()
     }
 
-    func showSetup(at step: SetupWindow.Step) {
-        if setup == nil {
-            setup = SetupWindow(app: self, step: step)
+    func showSetup(_ page: SetupWindow.Page) {
+        if let setup {
+            setup.go(to: page)
         } else {
-            setup?.go(to: step)
+            setup = SetupWindow(app: self, page: page)
         }
         setup?.show()
     }
@@ -1494,7 +1494,7 @@ final class DockPlus: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(.separator())
         } else if !trusted {
             menu.addItem(infoItem("DockPlus is off: it needs Accessibility"))
-            menu.addItem(actionItem("Allow Accessibility…", #selector(openSetupAtAccessibility)))
+            menu.addItem(actionItem("Allow Accessibility…", #selector(openSetupPermissions)))
             menu.addItem(.separator())
         } else if tapFailed {
             menu.addItem(infoItem("DockPlus can't see Dock clicks. Try quitting and reopening it."))
@@ -1591,8 +1591,8 @@ final class DockPlus: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func chooseLifetime(_ sender: NSMenuItem) { setThumbnailLifetime(sender.tag) }
 
-    @objc private func openSetup() { showSetup(at: .welcome) }
-    @objc private func openSetupAtAccessibility() { showSetup(at: .accessibility) }
+    @objc private func openSetup() { showSetup(.welcome) }
+    @objc private func openSetupPermissions() { showSetup(.setup) }
     @objc private func openAccessibilitySettings() { requestAccessibility() }
     @objc private func openScreenRecordingSettings() { requestScreenRecording() }
 
@@ -1631,30 +1631,35 @@ final class DockPlus: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 // MARK: - Setup window
 
-/// The first-run guide. It explains what DockPlus does and why it needs each permission
-/// before macOS asks, and asks only when the user presses a button. It shows again at the
-/// Accessibility step whenever DockPlus launches without Accessibility.
+/// The first-run guide, in two screens. The welcome screen says what DockPlus does and how
+/// it protects the user. The setup screen explains why DockPlus needs each permission before
+/// macOS asks, asks only when the user presses a button, and offers the few settings there
+/// are. The setup screen shows again whenever DockPlus launches without Accessibility.
 ///
 /// It only hands off to macOS's own prompts and System Settings: it never looks like a
 /// system dialog and never asks for a password.
 final class SetupWindow: NSObject, NSWindowDelegate {
-    enum Step: Int {
-        case welcome, accessibility, screenRecording, features, done
-    }
+    enum Page { case welcome, setup }
+
+    private static let width: CGFloat = 520
+    private static let margin: CGFloat = 28
 
     private unowned let app: DockPlus
     private let window: NSWindow
-    private var step: Step
+    private var page: Page
     private let stack = NSStackView()
     private let backButton = NSButton(title: "Back", target: nil, action: nil)
-    private let nextButton = NSButton(title: "Continue", target: nil, action: nil)
-    private var statusLabel: NSTextField?   // live permission status on the permission steps
+    private let doneButton = NSButton(title: "Done", target: nil, action: nil)
+    private let accessibilityStatus = NSTextField(labelWithString: "")
+    private let screenRecordingStatus = NSTextField(labelWithString: "")
+    private var accessibilityButton: NSButton?
+    private var screenRecordingButton: NSButton?
     private var finished = false
 
-    init(app: DockPlus, step: Step) {
+    init(app: DockPlus, page: Page) {
         self.app = app
-        self.step = step
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 360),
+        self.page = page
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 480),
                           styleMask: [.titled, .closable],
                           backing: .buffered, defer: false)
         super.init()
@@ -1664,38 +1669,38 @@ final class SetupWindow: NSObject, NSWindowDelegate {
 
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
-        stack.edgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 0, right: 28)
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 24, left: Self.margin, bottom: 0, right: Self.margin)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
+        doneButton.target = self
+        doneButton.action = #selector(done)
+        doneButton.bezelStyle = .rounded
+        doneButton.keyEquivalent = "\r"
+        doneButton.translatesAutoresizingMaskIntoConstraints = false
         backButton.target = self
         backButton.action = #selector(back)
         backButton.bezelStyle = .rounded
-        nextButton.target = self
-        nextButton.action = #selector(next)
-        nextButton.bezelStyle = .rounded
-        nextButton.keyEquivalent = "\r"
         backButton.translatesAutoresizingMaskIntoConstraints = false
-        nextButton.translatesAutoresizingMaskIntoConstraints = false
 
         let content = NSView()
         content.addSubview(stack)
         content.addSubview(backButton)
-        content.addSubview(nextButton)
+        content.addSubview(doneButton)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: content.topAnchor),
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: nextButton.topAnchor, constant: -16),
-            backButton.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 28),
+            stack.bottomAnchor.constraint(equalTo: doneButton.topAnchor, constant: -16),
+            doneButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -Self.margin),
+            doneButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
+            backButton.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Self.margin),
             backButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
-            nextButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -28),
-            nextButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
-            content.widthAnchor.constraint(equalToConstant: 520),
-            content.heightAnchor.constraint(greaterThanOrEqualToConstant: 360),
+            content.widthAnchor.constraint(equalToConstant: Self.width),
         ])
         window.contentView = content
         build()
+        window.layoutIfNeeded()
         window.center()
     }
 
@@ -1704,98 +1709,106 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
-    func go(to newStep: Step) {
-        step = newStep
+    func go(to newPage: Page) {
+        page = newPage
         build()
     }
 
-    // MARK: Steps
-
     private func build() {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        statusLabel = nil
-        backButton.isHidden = step == .welcome || step == .done
-
-        switch step {
-        case .welcome:
-            add(title("Welcome to DockPlus"))
-            add(text("DockPlus adds two things to your Dock: double-click an app's icon to minimize or restore its window, and hover over it to see all of its windows."))
-            add(text("To do that it needs two permissions, which the next steps explain. You choose whether to allow each one, and you can change your mind at any time in System Settings."))
-            add(heading("Your privacy"))
-            add(text("DockPlus never connects to the internet. It saves nothing except your settings. Window pictures for the hover preview stay in memory, are deleted when their app quits (or sooner, if you choose), and are gone when DockPlus quits."))
-            nextButton.title = "Continue"
-
-        case .accessibility:
-            add(title("Allow Accessibility"))
-            add(text("Required. DockPlus uses Accessibility to see which Dock icon you're pointing at, to notice double-clicks on it, and to minimize, restore and switch windows."))
-            add(text("macOS describes this as letting DockPlus control your computer. DockPlus only uses it for the Dock and window actions above."))
-            addStatus()
-            add(button("Allow Accessibility…", #selector(allowAccessibility)))
-            add(note("Click Allow Accessibility, then turn on DockPlus in the list System Settings shows."))
-            if app.hasLegacyInstall {
-                add(note("Updating from an earlier version? If the list shows DockPlus twice, remove the entry that's turned off with the − button. Do the same under Screen Recording."))
-            }
-            nextButton.title = "Continue"
-
-        case .screenRecording:
-            add(title("Allow Screen Recording (optional)"))
-            add(text("Only needed for the window pictures in the hover preview. Without it, the preview lists window titles and app icons instead, and everything else works."))
-            add(text("DockPlus never records video or audio and never saves pictures to disk. It doesn't capture hidden apps, and the preview is hidden from screen sharing where macOS allows."))
-            addStatus()
-            add(button("Allow Screen Recording…", #selector(allowScreenRecording)))
-            add(note("macOS may ask you to quit and reopen DockPlus before thumbnails appear."))
-
-        case .features:
-            add(title("Choose what DockPlus does"))
-            add(checkbox("Double-click a Dock icon to minimize or restore its window",
-                         on: app.isSettingOn("doubleClickToggle"), #selector(toggleDoubleClick(_:))))
-            add(checkbox("Hover over a Dock icon to show all of its windows",
-                         on: app.isSettingOn("hoverPreviews"), #selector(toggleHover(_:))))
-            add(lifetimeRow())
-            add(checkbox("Open DockPlus when you log in",
-                         on: app.opensAtLogin, #selector(toggleLogin(_:))))
-            add(note("You can change these later from the DockPlus menu in the menu bar."))
-            nextButton.title = "Continue"
-
-        case .done:
-            add(title("DockPlus is ready"))
-            add(text("Try it: point at an open app's icon in the Dock, or double-click it."))
-            add(text("DockPlus lives in the menu bar. Use its menu to change settings, check permissions or quit. The icon turns into a warning sign if DockPlus needs your attention."))
-            nextButton.title = "Done"
+        accessibilityButton = nil
+        screenRecordingButton = nil
+        backButton.isHidden = page == .welcome
+        doneButton.title = page == .welcome ? "Continue" : "Done"
+        switch page {
+        case .welcome: buildWelcome()
+        case .setup: buildSetup()
         }
         refresh()
     }
 
-    /// Updates the live permission status and what Continue allows. Called every 2 seconds.
-    func refresh() {
-        switch step {
-        case .accessibility:
-            let trusted = AXIsProcessTrusted()
-            setStatus(trusted, on: "Accessibility is allowed", off: "Accessibility isn't allowed yet")
-            nextButton.isEnabled = trusted
-        case .screenRecording:
-            let allowed = CGPreflightScreenCaptureAccess()
-            setStatus(allowed, on: "Screen Recording is allowed", off: "Screen Recording isn't allowed")
-            nextButton.title = allowed ? "Continue" : "Continue Without Thumbnails"
-            nextButton.isEnabled = true
-        default:
-            nextButton.isEnabled = true
+    /// The features and protections here follow the README's feature list and its "Privacy
+    /// and security" section. Keep the two in step.
+    private func buildWelcome() {
+        add(title("Welcome to DockPlus"))
+        add(text("A small menu bar app that adds Dock and window behaviors macOS doesn't have."))
+
+        add(heading("What it does"), spaceBefore: 16)
+        add(highlight("cursorarrow.click.2", "Double-click to minimize and restore",
+                      "Double-click a running app's Dock icon to minimize its most recent window. Double-click again to bring back the window you minimized last."))
+        add(highlight("arrow.uturn.forward", "Focus follows minimize",
+                      "When you minimize an app's last window on screen, focus moves to the next window in front, so you can type in it right away."))
+        add(highlight("macwindow.on.rectangle", "Hover for window previews",
+                      "Rest the pointer on a running app's Dock icon to see a thumbnail of each of its windows. Click one to switch to it, or Option-click to minimize or restore just that window."))
+
+        add(heading("Privacy and security"), spaceBefore: 16)
+        add(highlight("wifi.slash", "No network access",
+                      "DockPlus never connects to the internet and contains no third-party code."))
+        add(highlight("memorychip", "Thumbnails stay in memory",
+                      "Window pictures are never written to disk or logged, and you choose how long they're kept. Only your settings are saved."))
+        add(highlight("eye.slash", "Private previews",
+                      "The hover panel is kept out of screen sharing where macOS allows it, and DockPlus never captures the windows of hidden apps."))
+        add(highlight("lock.shield", "Hardened Runtime",
+                      "The app is signed so other programs can't inject code into it to borrow its permissions."))
+        add(highlight("hand.raised", "You control the permissions",
+                      "DockPlus asks only when you press a button, works without Screen Recording, and stops at once if you turn a permission off."))
+    }
+
+    private func buildSetup() {
+        add(title("Set up DockPlus"))
+
+        add(heading("1. Allow permissions"), spaceBefore: 16)
+        let allowAccessibility = button("Allow…", #selector(allowAccessibility))
+        accessibilityButton = allowAccessibility
+        add(row(accessibilityStatus, allowAccessibility))
+        add(note("Required. Lets DockPlus see which Dock icon you're pointing at and minimize, restore and switch windows. macOS calls this controlling your computer; DockPlus uses it only for that."))
+        let allowScreenRecording = button("Allow…", #selector(allowScreenRecording))
+        screenRecordingButton = allowScreenRecording
+        add(row(screenRecordingStatus, allowScreenRecording), spaceBefore: 14)
+        add(note("Optional. Only for the thumbnails in the hover preview; without it you get window titles and app icons. Nothing is recorded or saved to disk. macOS may ask you to reopen DockPlus."))
+        if app.hasLegacyInstall {
+            add(note("Updating from an earlier version? If System Settings lists DockPlus twice, remove the entry that's turned off with the − button."),
+                spaceBefore: 14)
         }
+
+        add(heading("2. Choose what DockPlus does"), spaceBefore: 16)
+        add(checkbox("Double-click a Dock icon to minimize or restore its window",
+                     on: app.isSettingOn("doubleClickToggle"), #selector(toggleDoubleClick(_:))))
+        add(checkbox("Hover over a Dock icon to show all of its windows",
+                     on: app.isSettingOn("hoverPreviews"), #selector(toggleHover(_:))))
+        add(lifetimeRow())
+        add(checkbox("Open DockPlus when you log in",
+                     on: app.opensAtLogin, #selector(toggleLogin(_:))))
+        add(note("You can change all of this later from the DockPlus icon in the menu bar."), spaceBefore: 14)
     }
 
-    @objc private func back() {
-        guard let previous = Step(rawValue: step.rawValue - 1) else { return }
-        go(to: previous)
-    }
-
-    @objc private func next() {
-        guard let following = Step(rawValue: step.rawValue + 1) else {
-            finished = true
-            window.close()
-            app.setupFinished()
+    /// Updates the live permission status. Done needs Accessibility. Called every 2 seconds.
+    func refresh() {
+        guard page == .setup else {
+            doneButton.isEnabled = true
+            doneButton.toolTip = nil
             return
         }
-        go(to: following)
+        let trusted = AXIsProcessTrusted()
+        setStatus(accessibilityStatus, trusted, "Accessibility")
+        accessibilityButton?.isHidden = trusted
+        let canCapture = CGPreflightScreenCaptureAccess()
+        setStatus(screenRecordingStatus, canCapture, "Screen Recording (optional)")
+        screenRecordingButton?.isHidden = canCapture
+        doneButton.isEnabled = trusted
+        doneButton.toolTip = trusted ? nil : "Allow Accessibility first"
+    }
+
+    @objc private func back() { go(to: .welcome) }
+
+    @objc private func done() {
+        guard page == .setup else {
+            go(to: .setup)
+            return
+        }
+        finished = true
+        window.close()
+        app.setupFinished()
     }
 
     @objc private func allowAccessibility() { app.requestAccessibility() }
@@ -1816,11 +1829,11 @@ final class SetupWindow: NSObject, NSWindowDelegate {
 
     // MARK: Views
 
-    private func add(_ view: NSView) {
-        stack.addArrangedSubview(view)
-        if view is NSTextField {
-            view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -56).isActive = true
+    private func add(_ view: NSView, spaceBefore: CGFloat? = nil) {
+        if let spaceBefore, let last = stack.arrangedSubviews.last {
+            stack.setCustomSpacing(spaceBefore, after: last)
         }
+        stack.addArrangedSubview(view)
     }
 
     private func title(_ string: String) -> NSTextField {
@@ -1839,7 +1852,7 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         let label = NSTextField(wrappingLabelWithString: string)
         label.font = .systemFont(ofSize: 13)
         label.isSelectable = false
-        label.preferredMaxLayoutWidth = 464 // window width minus the side margins
+        label.preferredMaxLayoutWidth = Self.width - 2 * Self.margin
         return label
     }
 
@@ -1850,9 +1863,36 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         return label
     }
 
+    /// One feature or protection on the welcome screen: a symbol, a bold name and a sentence.
+    private func highlight(_ symbol: String, _ name: String, _ detail: String) -> NSView {
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            ?? NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 17, weight: .regular)
+        icon.contentTintColor = .controlAccentColor
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.widthAnchor.constraint(equalToConstant: 26).isActive = true
+
+        let nameLabel = NSTextField(labelWithString: name)
+        nameLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        let detailLabel = note(detail)
+        detailLabel.preferredMaxLayoutWidth = Self.width - 2 * Self.margin - 26 - 10
+        let words = NSStackView(views: [nameLabel, detailLabel])
+        words.orientation = .vertical
+        words.alignment = .leading
+        words.spacing = 2
+
+        let row = NSStackView(views: [icon, words])
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.spacing = 10
+        return row
+    }
+
     private func button(_ title: String, _ action: Selector) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
         button.bezelStyle = .rounded
+        button.controlSize = .small
         return button
     }
 
@@ -1862,7 +1902,14 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         return box
     }
 
-    /// "Keep preview thumbnails for [1 Hour]", for minimized windows in the hover preview.
+    private func row(_ views: NSView...) -> NSStackView {
+        let row = NSStackView(views: views)
+        row.orientation = .horizontal
+        row.spacing = 8
+        return row
+    }
+
+    /// "Keep preview thumbnails for [Until the App Quits]", for minimized windows in the hover preview.
     private func lifetimeRow() -> NSView {
         let label = NSTextField(labelWithString: "Keep preview thumbnails for")
         label.font = .systemFont(ofSize: 13)
@@ -1874,24 +1921,16 @@ final class SetupWindow: NSObject, NSWindowDelegate {
         popUp.selectItem(withTag: app.thumbnailLifetime)
         popUp.target = self
         popUp.action = #selector(chooseLifetime(_:))
-        let row = NSStackView(views: [label, popUp])
-        row.orientation = .horizontal
-        row.spacing = 8
+        let row = row(label, popUp)
         // Indented under the hover checkbox it belongs to.
         row.edgeInsets = NSEdgeInsets(top: 0, left: 20, bottom: 0, right: 0)
         return row
     }
 
-    private func addStatus() {
-        let label = NSTextField(labelWithString: "")
+    private func setStatus(_ label: NSTextField, _ on: Bool, _ name: String) {
         label.font = .systemFont(ofSize: 13, weight: .medium)
-        statusLabel = label
-        add(label)
-    }
-
-    private func setStatus(_ on: Bool, on onText: String, off offText: String) {
-        statusLabel?.stringValue = on ? "✓ " + onText : "○ " + offText
-        statusLabel?.textColor = on ? .systemGreen : .secondaryLabelColor
+        label.stringValue = on ? "✓ \(name): allowed" : "○ \(name): not allowed yet"
+        label.textColor = on ? .systemGreen : .labelColor
     }
 }
 

@@ -9,7 +9,7 @@
 - When you minimize an app's last window on screen (with DockPlus, the yellow button or ⌘M), the next window in front gets focus instead of the empty app.
 - DockPlus has its own app icon in Finder, Launchpad and System Settings.
 - The menu bar icon now matches the app icon.
-- **Setup guide.** On first launch (and once after updating), a short setup window explains what DockPlus does and why it needs each permission, before macOS asks. Screen Recording is optional: skip it and the hover preview shows titles and app icons instead of window pictures. DockPlus starts working once you finish setup and allow Accessibility.
+- **Setup guide.** On first launch (and once after updating), DockPlus shows two short screens: a welcome that sums up what it does and how it protects you, then one screen to allow permissions and choose your settings. It explains why it needs each permission before macOS asks. Screen Recording is optional: skip it and the hover preview shows titles and app icons instead of window pictures. DockPlus starts working once you finish setup and allow Accessibility.
 - **Permission status in the menu.** The DockPlus menu shows whether Accessibility and Screen Recording are allowed, and each line opens the right page of System Settings. The menu bar icon turns into a warning sign while DockPlus can't work.
 - If you turn off Accessibility for DockPlus while it's running, it stops watching clicks and the Dock right away, and picks up again when you turn it back on. Turning off Screen Recording drops any window pictures it kept in memory.
 - DockPlus no longer asks for Screen Recording the first time you hover over the Dock.
