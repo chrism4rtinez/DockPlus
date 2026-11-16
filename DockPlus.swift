@@ -43,7 +43,12 @@
 //   • For those minimized-window pictures, DockPlus keeps a small, downscaled thumbnail of a
 //     window when it is clicked, focused, or shown in the panel (at most 64, in memory only,
 //     dropped when the app quits). This only happens while hover previews are on.
-//   • Screen Recording is only requested the first time a hover preview is about to appear.
+//   • Nothing asks for a permission at launch. A setup window explains each permission first
+//     and asks only when the user presses its button; Screen Recording is optional.
+//   • DockPlus only runs (event tap, Dock and app observers) once setup is finished and
+//     Accessibility is allowed. If Accessibility is taken away, it removes the event tap and
+//     stops at once, and the menu bar icon turns into a warning sign. If Screen Recording is
+//     taken away, cached window pictures are dropped.
 //
 // Permissions: Accessibility (required), Screen Recording (thumbnails only).
 // Build: ./build.sh — see that file. Start the app from Finder or `open`, not from Terminal.
@@ -430,6 +435,12 @@ final class MinimizeTracker {
         history[pid] = nil
     }
 
+    /// Stops watching every app, e.g. when Accessibility is taken away.
+    func forgetAll() {
+        for pid in Array(observers.keys) { forget(pid) }
+        history.removeAll()
+    }
+
     func record(_ window: AXUIElement, minimized: Bool) {
         let pid = axPID(window)
         var list = history[pid] ?? []
@@ -770,7 +781,7 @@ final class Locked<Value> {
     }
 }
 
-final class DockPlus: NSObject, NSApplicationDelegate {
+final class DockPlus: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static let shared = DockPlus()
 
     let tracker = MinimizeTracker()
@@ -786,15 +797,20 @@ final class DockPlus: NSObject, NSApplicationDelegate {
     private var dockObserver: AXObserver?
     private var pendingShow: DispatchWorkItem?
     private var pendingHandoff: DispatchWorkItem?
-    private var askedForScreenCapture = false
     private var suppressedItem: AXUIElement? // Dock icon last right-clicked; no previews for now
     private var statusItem: NSStatusItem?
     private var started = false
+    private var tapFailed = false            // the event tap couldn't be created
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var dockTimer: Timer?
+    private var couldCapture = false         // Screen Recording at the last permission check
+    private var promptedForAccessibility = false
+    private var setup: SetupWindow?
 
     // Shared with the event-tap thread
     private let tapState = Locked(TapState())
-    private var eventTap: CFMachPort?  // set once, before the tap thread starts
-    private var tapThread: Thread?
+    private let eventTap = Locked<CFMachPort?>(nil)
+    private let tapRunLoop = Locked<CFRunLoop?>(nil)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         preview.onFrameChange = { [tapState = self.tapState] frame in
@@ -806,18 +822,103 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         migrateLegacySettings()
         defaults.register(defaults: ["doubleClickToggle": true, "hoverPreviews": true])
         setUpMenu()
-        // Screen Recording is requested later, only when a hover preview is about to appear.
-        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-        if AXIsProcessTrustedWithOptions(options) {
-            start()
-        } else {
-            Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
-                guard AXIsProcessTrusted() else { return }
-                timer.invalidate()
-                self?.start()
-            }
+        couldCapture = CGPreflightScreenCaptureAccess()
+
+        // Nothing asks for a permission at launch. The setup window explains each one first and
+        // asks only when the user presses its button. DockPlus starts working (event tap, Dock
+        // and app observers) only once setup is finished and Accessibility is allowed.
+        if !setupComplete {
+            showSetup(at: .welcome)
+        } else if !AXIsProcessTrusted() {
+            showSetup(at: .accessibility)
+        }
+        checkPermissions()
+        // Permissions can be granted or taken away in System Settings at any time.
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.checkPermissions()
         }
     }
+
+    // MARK: Permissions and setup
+
+    var setupComplete: Bool { defaults.bool(forKey: "setupComplete") }
+
+    /// Runs every 2 seconds and after each setup step. Starts DockPlus once it may run, stops
+    /// it as soon as Accessibility is taken away, and keeps the menu bar icon and the setup
+    /// window in step with what macOS reports.
+    func checkPermissions() {
+        let trusted = AXIsProcessTrusted()
+        if trusted && setupComplete {
+            start()
+            if tapFailed { // try again; it can fail right after Accessibility is allowed
+                tapFailed = false
+                installEventTap()
+            }
+        } else if started {
+            stop()
+        }
+        // Thumbnails were captured under Screen Recording. If it's taken away, drop them too.
+        let canCapture = CGPreflightScreenCaptureAccess()
+        if couldCapture && !canCapture {
+            preview.hide()
+            preview.thumbnails.removeAll()
+        }
+        couldCapture = canCapture
+        updateStatusIcon(needsAttention: !trusted || !setupComplete || tapFailed)
+        setup?.refresh()
+    }
+
+    func showSetup(at step: SetupWindow.Step) {
+        if setup == nil {
+            setup = SetupWindow(app: self, step: step)
+        } else {
+            setup?.go(to: step)
+        }
+        setup?.show()
+    }
+
+    func setupFinished() {
+        defaults.set(true, forKey: "setupComplete")
+        setup = nil
+        checkPermissions()
+    }
+
+    func setupClosed() {
+        setup = nil
+    }
+
+    /// Shows the system's Accessibility prompt, which adds DockPlus to the list in System
+    /// Settings. If that was already shown in this session, opens the list directly.
+    func requestAccessibility() {
+        if promptedForAccessibility || AXIsProcessTrusted() {
+            openPrivacyPane("Privacy_Accessibility")
+        } else {
+            promptedForAccessibility = true
+            let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+        }
+    }
+
+    /// macOS shows the Screen Recording prompt only once per app, ever. After that, the only
+    /// way to allow it is in System Settings, so open that instead.
+    func requestScreenRecording() {
+        if defaults.bool(forKey: "requestedScreenRecording") || CGPreflightScreenCaptureAccess() {
+            openPrivacyPane("Privacy_ScreenCapture")
+        } else {
+            defaults.set(true, forKey: "requestedScreenRecording")
+            _ = CGRequestScreenCaptureAccess()
+        }
+    }
+
+    func openPrivacyPane(_ anchor: String) {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// True if DockPlus was used under its old bundle ID, so System Settings may still list an
+    /// old DockPlus entry with permissions it no longer needs.
+    var hasLegacyInstall: Bool { defaults.persistentDomain(forName: "local.dockplus") != nil }
 
     /// Copies settings saved under the old bundle ID, local.dockplus. Never overwrites a
     /// setting saved under the current ID, so it's safe on every launch. Must run before
@@ -839,31 +940,62 @@ final class DockPlus: NSObject, NSApplicationDelegate {
 
         for app in NSWorkspace.shared.runningApplications { tracker.watch(app) }
         let center = NSWorkspace.shared.notificationCenter
-        center.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
+        workspaceObservers.append(center.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self?.tracker.watch(app) }
-        }
-        center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                guard let self, self.started else { return }
+                self.tracker.watch(app)
+            }
+        })
+        workspaceObservers.append(center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             self.tracker.forget(app.processIdentifier)
             self.preview.thumbnails.forget(app.processIdentifier)
             if self.preview.shownPID == app.processIdentifier { self.preview.hide() }
-        }
+        })
         // Keep the hovered app's snapshot current while the pointer rests on its icon.
         for name in [NSWorkspace.didActivateApplicationNotification,
                      NSWorkspace.didHideApplicationNotification,
                      NSWorkspace.didUnhideApplicationNotification] {
-            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+            workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 self?.refreshHoverSnapshot()
-            }
+            })
         }
 
         // The Dock restarts on `killall Dock`, display changes, etc. Re-attach when its pid changes.
-        Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+        dockTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             guard let self else { return }
             let current = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier
             if current != self.dockPID || self.dockList == nil { self.attachToDock() } else { self.readMagnification() }
         }
+    }
+
+    /// Undoes start() when Accessibility is taken away: removes the event tap, so DockPlus no
+    /// longer sees any clicks, stops watching the Dock and other apps, and drops every window
+    /// picture. start() runs again once Accessibility is allowed again.
+    private func stop() {
+        guard started else { return }
+        started = false
+        removeEventTap()
+        tapFailed = false
+        dockTimer?.invalidate()
+        dockTimer = nil
+        let center = NSWorkspace.shared.notificationCenter
+        for observer in workspaceObservers { center.removeObserver(observer) }
+        workspaceObservers.removeAll()
+        if let observer = dockObserver {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+            dockObserver = nil
+        }
+        dockList = nil
+        dockPID = 0
+        suppressedItem = nil
+        tracker.forgetAll()
+        pendingShow?.cancel()
+        pendingHandoff?.cancel()
+        preview.hide()
+        preview.thumbnails.removeAll()
+        tapState.with { $0 = TapState() }
     }
 
     // MARK: Last-seen thumbnails
@@ -1031,7 +1163,6 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         let item = hover.item
         let app = hover.app
         if preview.isVisible && preview.shownPID == app.processIdentifier { return }
-        requestScreenCaptureIfNeeded()
         pendingShow?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self,
@@ -1058,14 +1189,6 @@ final class DockPlus: NSObject, NSApplicationDelegate {
         axElements(icon, kAXChildrenAttribute).contains { axString($0, kAXRoleAttribute) == kAXMenuRole }
     }
 
-    /// Screen Recording is only needed for thumbnails, so it's requested the first time a
-    /// preview is about to appear rather than at launch.
-    private func requestScreenCaptureIfNeeded() {
-        guard !askedForScreenCapture, !CGPreflightScreenCaptureAccess() else { return }
-        askedForScreenCapture = true
-        _ = CGRequestScreenCaptureAccess()
-    }
-
     // MARK: Double-click
 
     private func installEventTap() {
@@ -1082,23 +1205,37 @@ final class DockPlus: NSObject, NSApplicationDelegate {
                                           callback: callback,
                                           userInfo: nil) else {
             NSLog("DockPlus: could not create the event tap — is Accessibility permission granted?")
+            tapFailed = true // shown in the menu bar
             return
         }
         CGEvent.tapEnable(tap: tap, enable: false) // enabled once its thread is serving it
-        eventTap = tap
+        eventTap.with { $0 = tap }
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
 
         // The tap gets its own thread, so work on the main thread (Accessibility calls into
         // other apps, the preview panel) can never hold up system-wide mouse input.
-        let thread = Thread {
+        let thread = Thread { [tapRunLoop = self.tapRunLoop] in
+            tapRunLoop.with { $0 = CFRunLoopGetCurrent() }
             CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-            CGEvent.tapEnable(tap: tap, enable: true)
+            // Removed before this thread got here: the source is already invalid, and the run
+            // loop below returns at once because it has nothing to serve.
+            if CFMachPortIsValid(tap) { CGEvent.tapEnable(tap: tap, enable: true) }
             CFRunLoopRun()
         }
         thread.name = "DockPlus event tap"
         thread.qualityOfService = .userInteractive
         thread.start()
-        tapThread = thread
+    }
+
+    /// Turns the event tap off and lets its thread end. Invalidating the port removes its
+    /// source from the tap thread's run loop, which then has nothing left and returns.
+    private func removeEventTap() {
+        guard let tap = eventTap.with({ t -> CFMachPort? in defer { t = nil }; return t }) else { return }
+        CGEvent.tapEnable(tap: tap, enable: false)
+        CFMachPortInvalidate(tap)
+        if let runLoop = tapRunLoop.with({ r -> CFRunLoop? in defer { r = nil }; return r }) {
+            CFRunLoopStop(runLoop)
+        }
     }
 
     /// Runs on the tap thread, and every system-wide left and right click waits for it. It only
@@ -1111,7 +1248,8 @@ final class DockPlus: NSObject, NSApplicationDelegate {
                 s.armed = nil
                 s.swallowEventNumber = nil
             }
-            if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
+            // Only if it hasn't been removed meanwhile (Accessibility taken away).
+            if let tap = eventTap.with({ $0 }), CFMachPortIsValid(tap) { CGEvent.tapEnable(tap: tap, enable: true) }
             return pass
         case .leftMouseUp:
             // Drop only the mouse-up that belongs to the swallowed mouse-down. A mouse-down and
@@ -1258,32 +1396,87 @@ final class DockPlus: NSObject, NSApplicationDelegate {
 
     private func setUpMenu() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let image = NSImage(systemSymbolName: "dock.rectangle", accessibilityDescription: "DockPlus") {
-            item.button?.image = image
-        } else {
-            item.button?.title = "Dock+"
-        }
         let menu = NSMenu()
-        if !SPI.enabled {
-            let note = NSMenuItem(title: "Limited mode: untested macOS version", action: nil, keyEquivalent: "")
-            note.isEnabled = false
-            menu.addItem(note)
+        menu.delegate = self // rebuilt each time it opens, so permission status is current
+        item.menu = menu
+        statusItem = item
+        updateStatusIcon(needsAttention: false)
+    }
+
+    /// The menu bar icon shows a warning symbol while DockPlus can't work: setup isn't
+    /// finished, Accessibility isn't allowed, or the event tap couldn't be created.
+    private func updateStatusIcon(needsAttention: Bool) {
+        guard let button = statusItem?.button else { return }
+        let symbol = needsAttention ? "exclamationmark.triangle" : "dock.rectangle"
+        let description = needsAttention ? "DockPlus needs attention" : "DockPlus"
+        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description) {
+            image.isTemplate = true
+            button.image = image
+            button.title = ""
+        } else {
+            button.image = nil
+            button.title = needsAttention ? "Dock+ !" : "Dock+"
+        }
+        button.toolTip = description
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let trusted = AXIsProcessTrusted()
+        let canCapture = CGPreflightScreenCaptureAccess()
+
+        // What needs fixing comes first.
+        if !setupComplete {
+            menu.addItem(actionItem("Finish Setting Up DockPlus…", #selector(openSetup)))
+            menu.addItem(.separator())
+        } else if !trusted {
+            menu.addItem(infoItem("DockPlus is off: it needs Accessibility"))
+            menu.addItem(actionItem("Allow Accessibility…", #selector(openSetupAtAccessibility)))
+            menu.addItem(.separator())
+        } else if tapFailed {
+            menu.addItem(infoItem("DockPlus can't see Dock clicks. Try quitting and reopening it."))
             menu.addItem(.separator())
         }
+        if !SPI.enabled {
+            menu.addItem(infoItem("Limited mode: untested macOS version"))
+            menu.addItem(.separator())
+        }
+
         menu.addItem(toggleItem("Double-click icon: minimize / restore window", key: "doubleClickToggle"))
         menu.addItem(toggleItem("Hover icon: show all windows", key: "hoverPreviews"))
         menu.addItem(.separator())
-        let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin(_:)), keyEquivalent: "")
-        login.target = self
+
+        // Permission status. Each row opens the place to change it.
+        menu.addItem(actionItem(trusted ? "Accessibility: Allowed" : "Accessibility: Not allowed",
+                                #selector(openAccessibilitySettings),
+                                state: trusted ? .on : .off))
+        menu.addItem(actionItem(canCapture ? "Screen Recording: Allowed"
+                                           : "Screen Recording: Not allowed (no thumbnails)",
+                                #selector(openScreenRecordingSettings),
+                                state: canCapture ? .on : .off))
+        menu.addItem(.separator())
+
+        let login = actionItem("Open at Login", #selector(toggleLogin(_:)))
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
-        let privacy = NSMenuItem(title: "Privacy & Security Settings…", action: #selector(openPrivacy), keyEquivalent: "")
-        privacy.target = self
-        menu.addItem(privacy)
+        if setupComplete {
+            menu.addItem(actionItem("Setup Guide…", #selector(openSetup)))
+        }
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit DockPlus", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        item.menu = menu
-        statusItem = item
+    }
+
+    private func infoItem(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
+    }
+
+    private func actionItem(_ title: String, _ action: Selector, state: NSControl.StateValue = .off) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.state = state
+        return item
     }
 
     private func toggleItem(_ title: String, key: String) -> NSMenuItem {
@@ -1296,33 +1489,297 @@ final class DockPlus: NSObject, NSApplicationDelegate {
 
     @objc private func toggleSetting(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String else { return }
-        let value = !defaults.bool(forKey: key)
+        setSetting(key, !defaults.bool(forKey: key))
+    }
+
+    /// Changes one of the two feature settings, from the menu or the setup window.
+    func setSetting(_ key: String, _ value: Bool) {
         defaults.set(value, forKey: key)
-        sender.state = value ? .on : .off
         if key == "hoverPreviews" && !value {
             preview.hide()
             preview.thumbnails.removeAll() // no window pictures are kept while previews are off
         }
     }
 
+    func isSettingOn(_ key: String) -> Bool { defaults.bool(forKey: key) }
+
+    @objc private func openSetup() { showSetup(at: .welcome) }
+    @objc private func openSetupAtAccessibility() { showSetup(at: .accessibility) }
+    @objc private func openAccessibilitySettings() { requestAccessibility() }
+    @objc private func openScreenRecordingSettings() { requestScreenRecording() }
+
     @objc private func toggleLogin(_ sender: NSMenuItem) {
+        setOpenAtLogin(SMAppService.mainApp.status != .enabled)
+    }
+
+    var opensAtLogin: Bool { SMAppService.mainApp.status == .enabled }
+
+    /// Registers or removes the login item. macOS can require the user to approve it in
+    /// System Settings first; then that page is opened, and any other failure is shown.
+    func setOpenAtLogin(_ on: Bool) {
         do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
+            if on {
                 try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
             }
         } catch {
             // Never interpolate into NSLog's format string; pass values as arguments.
             NSLog("DockPlus: could not change login item: %@", error as NSError)
+            if SMAppService.mainApp.status != .requiresApproval {
+                let alert = NSAlert()
+                alert.messageText = on ? "DockPlus couldn't be set to open at login."
+                                       : "DockPlus couldn't be removed from your login items."
+                alert.informativeText = "You can change this in System Settings › General › Login Items."
+                NSApp.activate()
+                alert.runModal()
+            }
         }
-        sender.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        if on && SMAppService.mainApp.status == .requiresApproval {
+            SMAppService.openSystemSettingsLoginItems()
+        }
+    }
+}
+
+// MARK: - Setup window
+
+/// The first-run guide. It explains what DockPlus does and why it needs each permission
+/// before macOS asks, and asks only when the user presses a button. It shows again at the
+/// Accessibility step whenever DockPlus launches without Accessibility.
+///
+/// It only hands off to macOS's own prompts and System Settings: it never looks like a
+/// system dialog and never asks for a password.
+final class SetupWindow: NSObject, NSWindowDelegate {
+    enum Step: Int {
+        case welcome, accessibility, screenRecording, features, done
     }
 
-    @objc private func openPrivacy() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-            NSWorkspace.shared.open(url)
+    private unowned let app: DockPlus
+    private let window: NSWindow
+    private var step: Step
+    private let stack = NSStackView()
+    private let backButton = NSButton(title: "Back", target: nil, action: nil)
+    private let nextButton = NSButton(title: "Continue", target: nil, action: nil)
+    private var statusLabel: NSTextField?   // live permission status on the permission steps
+    private var finished = false
+
+    init(app: DockPlus, step: Step) {
+        self.app = app
+        self.step = step
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 360),
+                          styleMask: [.titled, .closable],
+                          backing: .buffered, defer: false)
+        super.init()
+        window.title = "Set Up DockPlus"
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.edgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 0, right: 28)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        backButton.target = self
+        backButton.action = #selector(back)
+        backButton.bezelStyle = .rounded
+        nextButton.target = self
+        nextButton.action = #selector(next)
+        nextButton.bezelStyle = .rounded
+        nextButton.keyEquivalent = "\r"
+        backButton.translatesAutoresizingMaskIntoConstraints = false
+        nextButton.translatesAutoresizingMaskIntoConstraints = false
+
+        let content = NSView()
+        content.addSubview(stack)
+        content.addSubview(backButton)
+        content.addSubview(nextButton)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: nextButton.topAnchor, constant: -16),
+            backButton.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 28),
+            backButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
+            nextButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -28),
+            nextButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
+            content.widthAnchor.constraint(equalToConstant: 520),
+            content.heightAnchor.constraint(greaterThanOrEqualToConstant: 360),
+        ])
+        window.contentView = content
+        build()
+        window.center()
+    }
+
+    func show() {
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func go(to newStep: Step) {
+        step = newStep
+        build()
+    }
+
+    // MARK: Steps
+
+    private func build() {
+        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        statusLabel = nil
+        backButton.isHidden = step == .welcome || step == .done
+
+        switch step {
+        case .welcome:
+            add(title("Welcome to DockPlus"))
+            add(text("DockPlus adds two things to your Dock: double-click an app's icon to minimize or restore its window, and hover over it to see all of its windows."))
+            add(text("To do that it needs two permissions, which the next steps explain. You choose whether to allow each one, and you can change your mind at any time in System Settings."))
+            add(heading("Your privacy"))
+            add(text("DockPlus never connects to the internet. It saves nothing except your settings. Window pictures for the hover preview stay in memory and are gone when DockPlus quits."))
+            nextButton.title = "Continue"
+
+        case .accessibility:
+            add(title("Allow Accessibility"))
+            add(text("Required. DockPlus uses Accessibility to see which Dock icon you're pointing at, to notice double-clicks on it, and to minimize, restore and switch windows."))
+            add(text("macOS describes this as letting DockPlus control your computer. DockPlus only uses it for the Dock and window actions above."))
+            addStatus()
+            add(button("Allow Accessibility…", #selector(allowAccessibility)))
+            add(note("Click Allow Accessibility, then turn on DockPlus in the list System Settings shows."))
+            if app.hasLegacyInstall {
+                add(note("Updating from an earlier version? If the list shows DockPlus twice, remove the entry that's turned off with the − button. Do the same under Screen Recording."))
+            }
+            nextButton.title = "Continue"
+
+        case .screenRecording:
+            add(title("Allow Screen Recording (optional)"))
+            add(text("Only needed for the window pictures in the hover preview. Without it, the preview lists window titles and app icons instead, and everything else works."))
+            add(text("DockPlus never records video or audio and never saves pictures to disk. It doesn't capture hidden apps, and the preview is hidden from screen sharing where macOS allows."))
+            addStatus()
+            add(button("Allow Screen Recording…", #selector(allowScreenRecording)))
+            add(note("macOS may ask you to quit and reopen DockPlus before thumbnails appear."))
+
+        case .features:
+            add(title("Choose what DockPlus does"))
+            add(checkbox("Double-click a Dock icon to minimize or restore its window",
+                         on: app.isSettingOn("doubleClickToggle"), #selector(toggleDoubleClick(_:))))
+            add(checkbox("Hover over a Dock icon to show all of its windows",
+                         on: app.isSettingOn("hoverPreviews"), #selector(toggleHover(_:))))
+            add(checkbox("Open DockPlus when you log in",
+                         on: app.opensAtLogin, #selector(toggleLogin(_:))))
+            add(note("You can change these later from the DockPlus menu in the menu bar."))
+            nextButton.title = "Continue"
+
+        case .done:
+            add(title("DockPlus is ready"))
+            add(text("Try it: point at an open app's icon in the Dock, or double-click it."))
+            add(text("DockPlus lives in the menu bar. Use its menu to change settings, check permissions or quit. The icon turns into a warning sign if DockPlus needs your attention."))
+            nextButton.title = "Done"
         }
+        refresh()
+    }
+
+    /// Updates the live permission status and what Continue allows. Called every 2 seconds.
+    func refresh() {
+        switch step {
+        case .accessibility:
+            let trusted = AXIsProcessTrusted()
+            setStatus(trusted, on: "Accessibility is allowed", off: "Accessibility isn't allowed yet")
+            nextButton.isEnabled = trusted
+        case .screenRecording:
+            let allowed = CGPreflightScreenCaptureAccess()
+            setStatus(allowed, on: "Screen Recording is allowed", off: "Screen Recording isn't allowed")
+            nextButton.title = allowed ? "Continue" : "Continue Without Thumbnails"
+            nextButton.isEnabled = true
+        default:
+            nextButton.isEnabled = true
+        }
+    }
+
+    @objc private func back() {
+        guard let previous = Step(rawValue: step.rawValue - 1) else { return }
+        go(to: previous)
+    }
+
+    @objc private func next() {
+        guard let following = Step(rawValue: step.rawValue + 1) else {
+            finished = true
+            window.close()
+            app.setupFinished()
+            return
+        }
+        go(to: following)
+    }
+
+    @objc private func allowAccessibility() { app.requestAccessibility() }
+    @objc private func allowScreenRecording() { app.requestScreenRecording() }
+    @objc private func toggleDoubleClick(_ sender: NSButton) { app.setSetting("doubleClickToggle", sender.state == .on) }
+    @objc private func toggleHover(_ sender: NSButton) { app.setSetting("hoverPreviews", sender.state == .on) }
+    @objc private func toggleLogin(_ sender: NSButton) {
+        app.setOpenAtLogin(sender.state == .on)
+        sender.state = app.opensAtLogin ? .on : .off
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if !finished { app.setupClosed() } // the menu offers to finish setting up
+    }
+
+    // MARK: Views
+
+    private func add(_ view: NSView) {
+        stack.addArrangedSubview(view)
+        if view is NSTextField {
+            view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -56).isActive = true
+        }
+    }
+
+    private func title(_ string: String) -> NSTextField {
+        let label = NSTextField(labelWithString: string)
+        label.font = .systemFont(ofSize: 20, weight: .semibold)
+        return label
+    }
+
+    private func heading(_ string: String) -> NSTextField {
+        let label = NSTextField(labelWithString: string)
+        label.font = .systemFont(ofSize: 13, weight: .semibold)
+        return label
+    }
+
+    private func text(_ string: String) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: string)
+        label.font = .systemFont(ofSize: 13)
+        label.isSelectable = false
+        label.preferredMaxLayoutWidth = 464 // window width minus the side margins
+        return label
+    }
+
+    private func note(_ string: String) -> NSTextField {
+        let label = text(string)
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = .secondaryLabelColor
+        return label
+    }
+
+    private func button(_ title: String, _ action: Selector) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.bezelStyle = .rounded
+        return button
+    }
+
+    private func checkbox(_ title: String, on: Bool, _ action: Selector) -> NSButton {
+        let box = NSButton(checkboxWithTitle: title, target: self, action: action)
+        box.state = on ? .on : .off
+        return box
+    }
+
+    private func addStatus() {
+        let label = NSTextField(labelWithString: "")
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        statusLabel = label
+        add(label)
+    }
+
+    private func setStatus(_ on: Bool, on onText: String, off offText: String) {
+        statusLabel?.stringValue = on ? "✓ " + onText : "○ " + offText
+        statusLabel?.textColor = on ? .systemGreen : .secondaryLabelColor
     }
 }
 
