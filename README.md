@@ -15,13 +15,23 @@ Double-click and hover previews can each be turned on and off from the DockPlus 
 
 - A Mac with **Apple silicon** (M1 or later). Intel Macs aren't supported.
 - **macOS 14 Sonoma** or later.
-- To build it yourself: Xcode or the Xcode Command Line Tools (`xcode-select --install`).
+- Only if you build it yourself: Xcode or the Xcode Command Line Tools (`xcode-select --install`).
 
 DockPlus uses a few private macOS APIs for window thumbnails and for focusing one specific window of another app. It only calls them on macOS versions where they're known to work (14 through 27). On any other version it runs in **limited mode**, shown at the top of its menu: no thumbnails, and switching to a window activates its app instead.
 
 ## Install
 
-There's no prebuilt download yet, so build it from source:
+1. Download `DockPlus-<version>.dmg` from the [latest release](https://github.com/chrism4rtinez/DockPlus/releases/latest). It's signed and notarized, so macOS opens it without warnings.
+2. Open the disk image and drag **DockPlus** onto the **Applications** shortcut next to it.
+3. Open DockPlus from Applications.
+4. Follow the setup guide that appears. Its first screen sums up what DockPlus does and how it protects you. The second is where you allow the permissions described below and choose your settings, including whether DockPlus opens when you log in.
+5. Press **Done**. DockPlus starts working once setup is finished and Accessibility is allowed.
+
+After setup, DockPlus has no Dock icon or windows of its own. Look for its icon in the menu bar, where you can change every setting later or reopen the guide with **Setup Guide…**.
+
+### Build from source
+
+If you'd rather build it yourself:
 
 ```sh
 git clone https://github.com/chrism4rtinez/Dockplus.git
@@ -29,14 +39,9 @@ cd Dockplus
 ./build.sh
 ```
 
-This makes `DockPlus.app` in the same folder. Then:
+This makes `DockPlus.app` in the same folder. Move it to `/Applications` and open it from Finder (or with `open /Applications/DockPlus.app`). Don't run the binary inside the app from Terminal, or macOS will ask to give Terminal the permissions instead of DockPlus. See [Building](#building) for signing options.
 
-1. Move `DockPlus.app` to `/Applications`.
-2. Open it from Finder (or with `open /Applications/DockPlus.app`). Don't run the binary inside the app from Terminal, or macOS will ask to give Terminal the permissions instead of DockPlus.
-3. Follow the setup guide that appears. Its first screen sums up what DockPlus does and how it protects you. The second is where you allow the permissions described below and choose your settings, including whether DockPlus opens when you log in.
-4. Press **Done**. DockPlus starts working once setup is finished and Accessibility is allowed.
-
-After setup, DockPlus has no Dock icon or windows of its own. Look for its icon in the menu bar, where you can change every setting later or reopen the guide with **Setup Guide…**.
+### Uninstall
 
 To uninstall, choose **Quit DockPlus** from its menu, delete the app, and remove its entries from System Settings › Privacy & Security (Accessibility and Screen Recording) and, if you used Open at Login, System Settings › General › Login Items.
 
