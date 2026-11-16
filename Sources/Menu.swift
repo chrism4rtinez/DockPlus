@@ -13,23 +13,18 @@ extension DockPlus: NSMenuDelegate {
         updateStatusIcon(needsAttention: false)
     }
 
-    /// The app icon's glyph (a Dock outline with a plus above a bar), drawn as a template
-    /// image so macOS colors it for a light or dark menu bar. The numbers are the glyph's
-    /// measurements in Icon/AppIcon-1024.png before it was scaled onto its tile: an 824 x 650
-    /// shape with its top-left corner at (100, 187).
+    /// The app icon's glyph (a plus above a bar), drawn as a template image so macOS colors it
+    /// for a light or dark menu bar. The numbers are the glyph's measurements in the icon's
+    /// original 1024 x 1024 artwork: a 509 x 397 shape with its top-left corner at (259, 317).
     private static let menuBarIcon: NSImage = {
-        let image = NSImage(size: NSSize(width: 22, height: 18), flipped: true) { rect in
-            let scale = rect.width / 824
+        let image = NSImage(size: NSSize(width: 21, height: 17), flipped: true) { rect in
+            let scale = rect.width / 509
             let transform = NSAffineTransform()
-            transform.translateX(by: 0, yBy: (rect.height - 650 * scale) / 2)
+            transform.translateX(by: 0, yBy: (rect.height - 397 * scale) / 2)
             transform.scale(by: scale)
-            transform.translateX(by: -100, yBy: -187)
+            transform.translateX(by: -259, yBy: -317)
             transform.concat()
             NSColor.black.set()
-            let outline = NSBezierPath(roundedRect: NSRect(x: 133, y: 220, width: 758, height: 584),
-                                       xRadius: 117, yRadius: 117)
-            outline.lineWidth = 66
-            outline.stroke()
             NSBezierPath(roundedRect: NSRect(x: 400, y: 397, width: 224, height: 64), xRadius: 32, yRadius: 32).fill()
             NSBezierPath(roundedRect: NSRect(x: 480, y: 317, width: 64, height: 224), xRadius: 32, yRadius: 32).fill()
             NSBezierPath(roundedRect: NSRect(x: 259, y: 605, width: 509, height: 109), xRadius: 28, yRadius: 28).fill()
