@@ -1,6 +1,6 @@
 # DockPlus
 
-DockPlus is a small menu bar app that adds two Dock behaviors macOS doesn't have:
+DockPlus is a small menu bar app that adds Dock and window behaviors macOS doesn't have:
 
 - **Double-click to minimize and restore.** Double-click a running app's Dock icon to minimize its most recent window. Double-click again to bring back the window you minimized last.
 - **Focus follows minimize.** When you minimize an app's last window on screen, whether with a double-click on its Dock icon, the yellow button or ⌘M, focus moves to the next window in front. You don't have to click another window before you can type in it.
@@ -9,7 +9,7 @@ DockPlus is a small menu bar app that adds two Dock behaviors macOS doesn't have
   - ⌥-click a thumbnail to minimize or restore just that window.
   - Right-click or Control-click the icon to close the panel and open the Dock's usual menu.
 
-Both behaviors can be turned on and off from the DockPlus menu in the menu bar.
+Double-click and hover previews can each be turned on and off from the DockPlus menu in the menu bar. Focus follows minimize is always on while DockPlus is running.
 
 ## Requirements
 
